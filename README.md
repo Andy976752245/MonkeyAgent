@@ -1,12 +1,48 @@
 # MonkeyAgent
 
-MonkeyAgent is a rules-first self-learning Agent prototype for SmartAgentOS.
+MonkeyAgent is a single-person, rules-first, self-learning personal assistant
+Agent for SmartAgentOS-style workflows.
+
+It is designed to be deployed by one person as a private assistant, not as a
+multi-tenant SaaS service. MonkeyAgent helps with everyday work such as preparing
+customer visits, writing reports, summarizing meetings, querying live
+information, creating Feishu/Lark message automations, remembering preferred
+formats, and turning repeated corrections into reviewed personal Rules or
+Skills.
+
+The core idea is simple: stable knowledge should become deterministic, personal
+habits should become memory, reusable methods should become Skills, and risky or
+uncertain actions should ask for confirmation instead of guessing.
 
 Execution priority is fixed:
 
 ```text
 deterministic Rules/tools -> semi-deterministic RAG/history/Skills -> LLM reasoning with human confirmation -> learning deposits
 ```
+
+## What MonkeyAgent Feels Like
+
+MonkeyAgent is meant to behave less like a one-shot chatbot and more like a
+personal operating layer:
+
+- **Ask for advice**: “我作为乙方软件公司的销售，明天要去拜访甲方，我应该准备什么？”
+  MonkeyAgent gives a practical preparation checklist first, then asks for
+  missing context only where it matters.
+- **Use settled rules first**: “已完成 10，总数 200，完成率是多少？”
+  If a percentage Rule exists, MonkeyAgent computes the exact result and the LLM
+  cannot override it.
+- **Remember preferences**: “以后默认用表格输出。”
+  The preference goes through pending review and, once adopted, later answers use
+  that format automatically.
+- **Explore missing capabilities**: “今天上海天气怎么样？”
+  If a weather tool is available, it uses the tool. If a stable tool gap is
+  detected, it can generate a reviewed candidate capability instead of inventing
+  weather.
+- **Work toward goals**: “帮我接入飞书机器人，支持给指定群发送消息。”
+  The Goal Engine decomposes the goal, explores docs/tools, runs safe dry-runs,
+  waits for confirmation before external writes, and records the trace.
+- **Explain itself**: every Ask, Goal, and Tool Builder attempt writes a Run
+  record so you can inspect why MonkeyAgent routed the request a certain way.
 
 ## Install
 
@@ -30,7 +66,10 @@ cp .env.bailian.example .env
 ## CLI
 
 ```bash
-monkey ask "帮我总结今天的会议纪要"
+monkey ask "我作为乙方软件公司的销售，明天要去拜访甲方，我应该准备什么？"
+monkey ask "帮我总结今天的会议纪要，并输出行动项"
+monkey ask "以后默认用表格输出，这是我的偏好"
+monkey ask "今天上海天气怎么样？"
 monkey rules list
 monkey skills list --type all
 monkey skills install vercel-labs/skills --skill find-skills
@@ -64,6 +103,98 @@ monkey adopt <candidate-id>
 monkey serve --port 8000
 ```
 
+## Personal Assistant Scenarios
+
+### 1. Sales visit preparation
+
+```bash
+python3 -m monkey_agent ask "我作为乙方软件公司的销售，明天要去拜访甲方，我应该准备什么？"
+```
+
+Expected behavior:
+
+- Classifies the request as personal/sales support rather than a calculation or
+  API task.
+- Gives a usable preparation plan: customer background, pain-point hypothesis,
+  agenda, discovery questions, materials, objection handling, and next-step
+  follow-up.
+- Does not force a generic “字段定义 / API / 数据源” clarification template.
+- May ask focused follow-up questions such as industry, product, meeting role,
+  and visit objective.
+
+### 2. Meeting note assistant
+
+```bash
+python3 -m monkey_agent ask "帮我把这段会议纪要整理成摘要、决策、待办和风险"
+```
+
+Expected behavior:
+
+- Uses YAML Skills or Agent Skills if a meeting-summary Skill is installed.
+- Applies personal memory such as “默认表格输出” after the preference is adopted.
+- If the meeting content is missing, asks for the transcript or notes instead of
+  fabricating decisions.
+
+### 3. Rules-first deterministic work
+
+```bash
+python3 -m monkey_agent ask "已完成10，总数200，完成率百分比是多少？" --context '{"numerator":10,"denominator":200}'
+```
+
+Expected behavior:
+
+- Hits the settled percentage Rule first.
+- Returns `5.00%`.
+- Records in Evaluation that the deterministic Rule value was used.
+
+### 4. Personal memory and adoption
+
+```bash
+python3 -m monkey_agent ask "以后默认用表格输出，这是我的偏好"
+python3 -m monkey_agent review list
+python3 -m monkey_agent ask "同意沉淀"
+python3 -m monkey_agent ask "帮我写一份项目周报"
+```
+
+Expected behavior:
+
+- The first request creates a pending Memory candidate.
+- `同意沉淀` promotes it into the personal workspace.
+- Later report-style answers prefer a table format.
+
+### 5. Live information and reusable capabilities
+
+```bash
+python3 -m monkey_agent ask "今天上海天气怎么样？"
+python3 -m monkey_agent ask "明天合肥天气怎么样？"
+```
+
+Expected behavior:
+
+- Uses the built-in weather capability when available.
+- If MonkeyAgent has to create a generated tool candidate, the learned ability is
+  generalized as “weather query capability”, not “today Shanghai only”.
+- Similar future weather questions should reuse the settled/generated capability
+  instead of rebuilding from scratch.
+
+### 6. Goal-driven assistant work
+
+```bash
+python3 -m monkey_agent goal start "帮我接入飞书机器人，支持给指定群发送消息，并沉淀成可复用能力。" --max-steps 5
+python3 -m monkey_agent goal step <goal-id>
+python3 -m monkey_agent goal events <goal-id>
+python3 -m monkey_agent runs latest --type goal
+```
+
+Expected behavior:
+
+- Decomposes the objective into a small task DAG.
+- Automatically performs safe planning, research, dry-run, and candidate
+  generation.
+- Stops at `waiting_human` before real external writes such as sending a Feishu
+  message.
+- Stores events, evidence, evaluations, and a Run Trace for review.
+
 ## Bailian Test
 
 After filling `.env`:
@@ -78,16 +209,23 @@ python3 -m monkey_agent model smoke --role tool_builder
 Then test the full Agent path:
 
 ```bash
+python3 -m monkey_agent ask "我作为乙方软件公司的销售，明天要去拜访甲方，我应该准备什么？"
 python3 -m monkey_agent ask "已完成10，总数200，完成率百分比是多少？" --context '{"numerator":10,"denominator":200}'
-python3 -m monkey_agent ask "帮我写一份项目周报"
+python3 -m monkey_agent ask "以后默认用表格输出，这是我的偏好"
+python3 -m monkey_agent ask "今天上海天气怎么样？"
 ```
 
 Expected behavior:
 
-- The first command should hit settled Rules first and return `5.00%`.
-- The second command should use Skills if no higher-priority Rule fully handles it.
-- If neither Rules nor Skills match, MonkeyAgent should ask for more information instead of guessing.
-- If a new capability gap is found, MonkeyAgent writes a pending candidate before asking for more information.
+- The sales visit question should return a practical assistant-style plan, not a
+  generic API/data-field clarification template.
+- The percentage command should hit settled Rules first and return `5.00%`.
+- The preference command should create a pending Memory candidate, which can be
+  adopted after review.
+- The weather command should use a capability/tool path or create a reviewed,
+  generalized capability candidate instead of inventing real-time facts.
+- If neither Rules, Skills, nor tools are sufficient, MonkeyAgent should ask for
+  focused clarification instead of guessing.
 
 ## API
 
