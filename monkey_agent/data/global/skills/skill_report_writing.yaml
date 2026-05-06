@@ -1,0 +1,17 @@
+id: skill_report_writing
+name: 通用报告写作 Skill
+description: 用于没有确定规则时组织周报、月报、总结和复盘。
+task_types:
+  - report_writing
+keywords:
+  - 周报
+  - 月报
+  - 总结
+  - 复盘
+priority: 60
+status: active
+prompt: |
+  按照“结论 -> 关键进展 -> 风险/阻塞 -> 下一步动作”的结构回答。
+  如果缺少具体事实或数据，不要编造，明确列出需要用户补充的信息。
+examples: []
+version: 1.0.0

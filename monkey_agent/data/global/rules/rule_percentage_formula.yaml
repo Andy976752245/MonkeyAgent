@@ -1,0 +1,17 @@
+id: rule_percentage_formula
+type: formula
+name: 通用百分比计算规则
+intent:
+  - calculation
+keywords:
+  - 百分比
+  - 完成率
+  - 占比
+  - 比例
+priority: 100
+status: active
+handler: percentage_formula
+output_format: percentage
+rule: |
+  百分比 = 分子 / 分母 * 100%。当用户提供已完成数量、部分数量、总数或目标数时，优先执行确定性计算。
+source: manual_seed

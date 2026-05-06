@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "monkey-agent"
+version = "0.1.0"
+description = "Rules-first self-learning agent built with LangGraph and Bailian-compatible models."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "certifi>=2024.8.30",
+  "fastapi>=0.115.0",
+  "langgraph>=1.1,<2",
+  "langgraph-checkpoint-sqlite>=3.0.0",
+  "openai>=1.59.0",
+  "pydantic>=2.7.0",
+  "python-dotenv>=1.0.1",
+  "pyyaml>=6.0.1",
+  "uvicorn[standard]>=0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+monkey = "monkey_agent.interfaces.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["monkey_agent*"]
+
+[tool.setuptools.package-data]
+monkey_agent = [
+  "data/global/rules/*.yaml",
+  "data/global/skills/*.yaml",
+  "data/global/memory/.gitkeep",
+  "data/global/counterexamples/.gitkeep",
+]

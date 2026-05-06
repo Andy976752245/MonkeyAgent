@@ -1,0 +1,15 @@
+id: rule_brief_summary_format
+type: business_definition
+name: 简洁摘要输出规则
+intent:
+  - report_writing
+keywords:
+  - 摘要
+  - 总结
+  - 汇报
+priority: 70
+status: active
+handler: pass_through
+rule: |
+  当用户要求生成摘要、总结或汇报时，默认先给出结论，再列出关键事实和下一步动作；缺少事实时明确请求补充，不编造。
+source: manual_seed

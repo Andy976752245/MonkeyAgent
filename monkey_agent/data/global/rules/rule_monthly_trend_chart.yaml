@@ -1,0 +1,18 @@
+id: rule_monthly_trend_chart
+type: chart
+name: 月度趋势图表规则
+intent:
+  - chart
+  - monthly_analysis
+keywords:
+  - 月度
+  - 趋势
+  - 环比
+  - 同比
+  - 图表
+priority: 80
+status: active
+handler: chart_recommendation
+rule: |
+  当用户分析月度趋势、环比变化或连续时间序列时，优先推荐折线图；如需对比类别贡献，再补充柱状图。
+source: manual_seed

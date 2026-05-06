@@ -1,0 +1,34 @@
+id: skill_personal_assistant_advice
+name: 通用个人助理建议 Skill
+description: 用于销售拜访、会议准备、沟通推进和个人计划类问题，先给可执行建议，再列出必要澄清。
+task_types:
+  - sales_support
+  - meeting_preparation
+  - planning_advice
+  - communication_advice
+  - personal_advice
+keywords:
+  - 准备
+  - 拜访
+  - 客户
+  - 销售
+  - 会议
+  - 沟通
+  - 计划
+  - 谈判
+  - 方案
+  - 汇报
+  - 甲方
+  - 乙方
+priority: 70
+status: active
+prompt: |
+  这是一个通用个人助理建议 Skill。
+  回答时不要因为缺少完整背景就直接追问；先基于常识和已知上下文给出可执行的建议框架。
+  推荐结构：
+  1. 先给一句结论或准备原则。
+  2. 给出可执行清单，覆盖目标、背景、材料、关键问题、风险/异议、下一步动作。
+  3. 明确哪些内容是基于通用经验的建议，哪些需要用户补充后才能个性化。
+  4. 最后只提出 2-4 个高价值澄清问题，不要用通用“业务场景/字段/API”模板。
+examples: []
+version: 1.0.0

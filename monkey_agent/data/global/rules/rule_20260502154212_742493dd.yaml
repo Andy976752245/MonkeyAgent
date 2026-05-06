@@ -1,0 +1,110 @@
+id: rule_20260502154212_742493dd
+status: active
+type: api_tool
+name: 天气查询能力规则
+intent:
+- weather_query
+keywords:
+- 天气
+- 气温
+- 降水
+- 风速
+- 今天
+- 明天
+- 后天
+priority: 90
+handler: capability_tool
+rule: 当用户询问任意城市的今天、明天或后天天气时，优先调用天气查询能力获取实时/预报数据；不得复用某一次样例城市或日期。
+source_question: 明天上海天气怎么样？
+source_tool: open_meteo_weather
+stability_decision: code
+public_support: false
+docs_url: null
+endpoint: null
+can_generate_rule_code: true
+handler_code_proposal: "def weather_query(rule, question, context):\n    \"\"\"Handler\
+  \ for weather queries using Open-Meteo tool.\n    Draft for human review.\n    \"\
+  \"\"\n    location = context.get(\"location\")\n    target_date = context.get(\"\
+  target_date\", \"tomorrow\")\n\n    if not location:\n        return {\n       \
+  \     \"rule_id\": rule.id,\n            \"rule_name\": rule.name,\n           \
+  \ \"type\": \"api_tool\",\n            \"requires_more_info\": True,\n         \
+  \   \"missing_fields\": [\"location\"],\n            \"reply\": \"请问您想查询哪个城市的天气？\"\
+  \n        }\n\n    # TODO: Replace with actual tool invocation in production pipeline\n\
+  \    # tool_response = call_tool(\"open_meteo_weather\", location=location, date=target_date)\n\
+  \    # For draft purposes, assume structured parsing of tool output:\n    tool_data\
+  \ = {\n        \"location\": location,\n        \"date\": target_date,\n       \
+  \ \"weather\": \"中雨\",\n        \"temp_max\": 22.0,\n        \"temp_min\": 14.8,\n\
+  \        \"precipitation\": 17.5,\n        \"wind_speed_max\": 20.4\n    }\n\n \
+  \   reply = (\n        f\"{location}明天天气为{tool_data['weather']}，\"\n        f\"\
+  气温 {tool_data['temp_min']}°C 至 {tool_data['temp_max']}°C，\"\n        f\"降水量约 {tool_data['precipitation']}\
+  \ mm，\"\n        f\"最大风速 {tool_data['wind_speed_max']} km/h。\"\n        f\"建议携带雨具，注意防风。\"\
+  \n    )\n\n    return {\n        \"rule_id\": rule.id,\n        \"rule_name\": rule.name,\n\
+  \        \"type\": \"api_tool\",\n        \"requires_more_info\": False,\n     \
+  \   \"reply\": reply,\n        \"tool_used\": \"open_meteo_weather\",\n        \"\
+  raw_data\": tool_data\n    }"
+sample_result:
+  provider: Open-Meteo
+  location:
+    name: 上海
+    country: 中国
+    admin1: 上海市
+    latitude: 31.22222
+    longitude: 121.45806
+    timezone: Asia/Shanghai
+  current:
+    time: '2026-05-03'
+    weather_code: 63
+    temperature_2m_max: 22.0
+    temperature_2m_min: 14.8
+    precipitation_sum: 17.5
+    wind_speed_10m_max: 20.4
+  requested_day: tomorrow
+  timezone: Asia/Shanghai
+sample_answer: 上海明天天气：中雨，气温 22.0°C 至 14.8°C，降水 17.5 mm，最大风速 20.4 km/h。
+sample_error: null
+code_promotion_policy: 工具已被探索调用。人工审核适用范围、输入输出、失败兜底和测试后，可以沉淀为正式 Rule。若样例调用失败，需要先修复配置或网络。
+context: {}
+generalization:
+  scope: 任意可被天气服务解析的地点
+  time_range:
+  - 今天
+  - 明天
+  - 后天
+  do_not_match_on_sample_city: true
+  input_extraction:
+  - location
+  - date
+examples:
+- 今天上海天气怎么样？
+- 今天合肥天气怎么样？
+- 明天上海天气怎么样？
+llm_draft:
+  stability_decision: code
+  rule: 当用户询问特定地点未来天气时，调用天气查询工具获取实时数据并格式化返回。
+  handler_name: weather_query
+  handler_code_proposal: "def weather_query(rule, question, context):\n    \"\"\"\
+    Handler for weather queries using Open-Meteo tool.\n    Draft for human review.\n\
+    \    \"\"\"\n    location = context.get(\"location\")\n    target_date = context.get(\"\
+    target_date\", \"tomorrow\")\n\n    if not location:\n        return {\n     \
+    \       \"rule_id\": rule.id,\n            \"rule_name\": rule.name,\n       \
+    \     \"type\": \"api_tool\",\n            \"requires_more_info\": True,\n   \
+    \         \"missing_fields\": [\"location\"],\n            \"reply\": \"请问您想查询哪个城市的天气？\"\
+    \n        }\n\n    # TODO: Replace with actual tool invocation in production pipeline\n\
+    \    # tool_response = call_tool(\"open_meteo_weather\", location=location, date=target_date)\n\
+    \    # For draft purposes, assume structured parsing of tool output:\n    tool_data\
+    \ = {\n        \"location\": location,\n        \"date\": target_date,\n     \
+    \   \"weather\": \"中雨\",\n        \"temp_max\": 22.0,\n        \"temp_min\": 14.8,\n\
+    \        \"precipitation\": 17.5,\n        \"wind_speed_max\": 20.4\n    }\n\n\
+    \    reply = (\n        f\"{location}明天天气为{tool_data['weather']}，\"\n        f\"\
+    气温 {tool_data['temp_min']}°C 至 {tool_data['temp_max']}°C，\"\n        f\"降水量约 {tool_data['precipitation']}\
+    \ mm，\"\n        f\"最大风速 {tool_data['wind_speed_max']} km/h。\"\n        f\"建议携带雨具，注意防风。\"\
+    \n    )\n\n    return {\n        \"rule_id\": rule.id,\n        \"rule_name\"\
+    : rule.name,\n        \"type\": \"api_tool\",\n        \"requires_more_info\"\
+    : False,\n        \"reply\": reply,\n        \"tool_used\": \"open_meteo_weather\"\
+    ,\n        \"raw_data\": tool_data\n    }"
+  skill_prompt: null
+  fallback_reason: null
+  required_human_review: true
+required_human_review: true
+source: reviewed_learning
+capability_tool_id: open_meteo_weather
