@@ -89,6 +89,48 @@ def settings_for(tmp: Path) -> Settings:
     )
 
 
+def write_basic_rules(rules_dir: Path) -> None:
+    for item in [
+        {
+            "id": "rule_basic_arithmetic",
+            "type": "formula",
+            "name": "通用四则运算规则",
+            "intent": ["calculation"],
+            "keywords": ["+", "-", "*", "/", "×", "÷", "等于几", "帮我算", "计算"],
+            "priority": 80,
+            "status": "active",
+            "handler": "arithmetic_formula",
+            "rule": "安全四则运算。",
+        },
+        {
+            "id": "rule_basic_date_calculation",
+            "type": "date",
+            "name": "通用日期推算规则",
+            "intent": ["date_calculation"],
+            "keywords": ["今天", "明天", "后天", "昨天", "下周", "天后", "相差几天", "多少天"],
+            "priority": 80,
+            "status": "active",
+            "handler": "date_calculation",
+            "rule": "常见日期推算。",
+        },
+        {
+            "id": "rule_basic_unit_conversion",
+            "type": "unit_conversion",
+            "name": "通用单位换算规则",
+            "intent": ["unit_conversion"],
+            "keywords": ["换算", "转换", "等于多少", "公里", "千米", "米", "千克", "公斤", "克", "摄氏", "华氏"],
+            "priority": 80,
+            "status": "active",
+            "handler": "unit_conversion",
+            "rule": "常见单位换算。",
+        },
+    ]:
+        rules_dir.joinpath(f"{item['id']}.yaml").write_text(
+            yaml.safe_dump(item, allow_unicode=True),
+            encoding="utf-8",
+        )
+
+
 class MonkeyAgentRulesFirstTest(unittest.TestCase):
     def test_rules_take_priority_over_skills(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -135,6 +177,116 @@ class MonkeyAgentRulesFirstTest(unittest.TestCase):
             self.assertEqual(result["route"], "rules")
             self.assertEqual(result["matched_skills"], [])
             self.assertEqual(result["deterministic_results"][0]["value"], "5.00%")
+
+    def test_basic_arithmetic_rule_handles_simple_expression(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings = settings_for(tmp)
+            write_basic_rules(settings.rules_dir)
+            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
+            result = agent.ask("1+1等于几")
+            self.assertEqual(result["route"], "rules")
+            self.assertEqual(result["deterministic_results"][0]["rule_id"], "rule_basic_arithmetic")
+            self.assertEqual(result["deterministic_results"][0]["value"], "2")
+            self.assertNotIn("need_more_info", result["execution_path"])
+
+    def test_basic_arithmetic_rule_handles_parentheses_safely(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings = settings_for(tmp)
+            write_basic_rules(settings.rules_dir)
+            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
+            result = agent.ask("帮我算一下 (2+3)*4")
+            self.assertEqual(result["route"], "rules")
+            self.assertEqual(result["deterministic_results"][0]["value"], "20")
+
+    def test_basic_arithmetic_rejects_unsafe_expression(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings = settings_for(tmp)
+            write_basic_rules(settings.rules_dir)
+            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
+            result = agent.ask("帮我算一下 __import__('os').system('echo bad') + 1")
+            self.assertEqual(result.get("route"), "rules")
+            self.assertTrue(result["deterministic_results"][0]["requires_more_info"])
+            self.assertIn("不支持或不安全", result["deterministic_results"][0]["content"])
+
+    def test_basic_date_rule_handles_relative_and_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings = settings_for(tmp)
+            write_basic_rules(settings.rules_dir)
+            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
+            tomorrow = agent.ask("明天是几号", context={"today": "2026-05-19"})
+            self.assertEqual(tomorrow["route"], "rules")
+            self.assertEqual(tomorrow["deterministic_results"][0]["value"], "2026-05-20")
+            diff = agent.ask("2026-05-19到2026-06-01相差几天")
+            self.assertEqual(diff["deterministic_results"][0]["value"], "13天")
+
+    def test_basic_unit_conversion_rule_handles_common_units(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings = settings_for(tmp)
+            write_basic_rules(settings.rules_dir)
+            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
+            length = agent.ask("1公里等于多少米")
+            self.assertEqual(length["route"], "rules")
+            self.assertEqual(length["deterministic_results"][0]["value"], "1000米")
+            temperature = agent.ask("摄氏30度是多少华氏度")
+            self.assertEqual(temperature["deterministic_results"][0]["value"], "86华氏度")
+
+    def test_general_knowledge_uses_reasoning_not_clarification_template(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings = settings_for(tmp)
+            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
+            result = agent.ask("水为什么会结冰")
+            self.assertEqual(result["route"], "general_reason")
+            self.assertIn("水结冰", result["answer"])
+            self.assertNotIn("字段定义", result["answer"])
+            self.assertIsNone(result.get("learning_candidate_id"))
+
+    def test_general_knowledge_difference_question_does_not_create_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings = settings_for(tmp)
+            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
+            result = agent.ask("Python和Java有什么区别")
+            self.assertEqual(result["route"], "general_reason")
+            self.assertIn("Python", result["answer"])
+            self.assertEqual(agent.list_pending(), [])
+
+    def test_general_knowledge_what_is_question_avoids_need_more_info(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings = settings_for(tmp)
+            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
+            result = agent.ask("什么是LangGraph")
+            self.assertEqual(result["route"], "general_reason")
+            self.assertNotIn("need_more_info", result["execution_path"])
+            self.assertFalse(result["routing_policy"]["clarification_allowed"])
+            self.assertEqual(result["routing_policy"]["category"], "general_knowledge")
+
+    def test_business_missing_context_still_allows_clarification(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings = settings_for(tmp)
+            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
+            result = agent.ask("分析一下这个数据")
+            self.assertEqual(result["route"], "need_more_info")
+            self.assertTrue(result["routing_policy"]["clarification_allowed"])
+            self.assertEqual(result["routing_policy"]["category"], "business_missing_context")
+
+    def test_route_policy_is_written_to_run_trace(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings = settings_for(tmp)
+            write_basic_rules(settings.rules_dir)
+            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
+            result = agent.ask("1+1等于几")
+            record = agent.get_run(result["run_id"])
+            self.assertEqual(record["routing_policy"]["category"], "deterministic_basic")
+            self.assertEqual(record["routing_policy"]["final_route"], result["routing_policy"]["final_route"])
 
     def test_skills_run_when_no_rules_match(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

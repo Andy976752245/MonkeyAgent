@@ -146,6 +146,7 @@ personal Rules
 含义：
 
 - 确定性任务优先用 Rules。
+- 基础四则运算、日期推算和单位换算属于全局确定性 Rules；普通常识问答不沉淀成单问单答 Rule，默认走 LLM Reasoning。
 - 方法论任务优先用 Skills。
 - 外部查询优先用 Tool / Web Search。
 - 已有工具不足时进入 Tool Builder。

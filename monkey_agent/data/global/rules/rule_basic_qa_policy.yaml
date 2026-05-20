@@ -1,0 +1,18 @@
+id: rule_basic_qa_policy
+type: policy
+name: 基础常识问题处理策略
+intent:
+  - general_knowledge
+keywords:
+  - 为什么
+  - 是什么
+  - 什么是
+  - 区别
+  - 介绍
+priority: 10
+status: inactive
+handler: pass_through
+output_format: policy
+rule: |
+  基础常识问题不沉淀为业务 Rule；没有固定业务口径时应走 LLM 常识回答，而不是返回业务字段/API 澄清模板。
+source: manual_seed

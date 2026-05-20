@@ -156,6 +156,7 @@ class RunStore:
             route=str(result.get("route") or result.get("next_action") or ""),
             execution_path=[str(item) for item in result.get("execution_path", [])],
             classification=dict(result.get("classification") or {}),
+            routing_policy=_compact(result.get("routing_policy") or {}),
             matched_rules=_compact_list(result.get("matched_rules")),
             matched_skills=_compact_list(result.get("matched_skills")),
             tools=_tools(result),

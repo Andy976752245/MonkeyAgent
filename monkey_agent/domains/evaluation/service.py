@@ -9,6 +9,7 @@ from monkey_agent.domains.evaluation.local_checks import (
     check_counterexamples,
     check_deterministic_result_used,
     check_evidence_available,
+    check_route_policy,
     check_rule_value_consistency,
     check_tool_builder_safety,
     check_tool_error_not_hidden,
@@ -28,6 +29,7 @@ class AskEvaluator:
             check_tool_error_not_hidden(state),
             check_evidence_available(state),
             check_clarification_specificity(state),
+            check_route_policy(state),
         ]
         counter_check, hits = check_counterexamples(state)
         checks.append(counter_check)

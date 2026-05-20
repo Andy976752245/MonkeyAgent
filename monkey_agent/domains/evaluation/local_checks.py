@@ -160,6 +160,43 @@ def check_clarification_specificity(state: dict[str, Any]) -> EvaluationCheck:
     return EvaluationCheck("clarification_specificity", True, "澄清问题没有使用通用模板。")
 
 
+def check_route_policy(state: dict[str, Any]) -> EvaluationCheck:
+    policy = state.get("routing_policy")
+    if not isinstance(policy, dict):
+        return EvaluationCheck("route_policy_check", True, "无路由策略摘要。")
+    route = str(state.get("route") or "")
+    category = str(policy.get("category") or "")
+    clarification_allowed = bool(policy.get("clarification_allowed"))
+    if route == "need_more_info" and not clarification_allowed:
+        return EvaluationCheck(
+            "route_policy_check",
+            False,
+            "当前问题不允许进入通用澄清模板。",
+            "error",
+            {"category": category, "policy": policy},
+        )
+    if route == "rules" and policy.get("blocked_rules"):
+        blocked = policy.get("blocked_rules") or []
+        matched_ids = {
+            str(item.get("id"))
+            for item in state.get("matched_rules", []) or []
+            if isinstance(item, dict)
+        }
+        leaked = [
+            item for item in blocked
+            if isinstance(item, dict) and str(item.get("rule_id")) in matched_ids
+        ]
+        if leaked:
+            return EvaluationCheck(
+                "route_policy_check",
+                False,
+                "被路由策略阻断的 Rule 仍被执行。",
+                "error",
+                {"blocked_rules": leaked},
+            )
+    return EvaluationCheck("route_policy_check", True, "路由策略检查通过。")
+
+
 def check_tool_builder_safety(tool_builder: dict[str, Any]) -> list[EvaluationCheck]:
     if not tool_builder:
         return [EvaluationCheck("tool_builder_present", True, "未触发 Tool Builder。")]

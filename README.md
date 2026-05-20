@@ -529,3 +529,18 @@ automation-style goals, and for stable external query gaps such as weather. It
 does not run for ordinary personal advice questions, which stay on the Ask or
 Goal reasoning path. Generated Rule candidates should describe a reusable
 capability, not one sample city, date, or input sentence.
+
+## Basic Knowledge and Rules
+
+Rules are not a giant common-sense database. MonkeyAgent only uses Rules for
+deterministic, verifiable behavior: business formulas, fixed definitions,
+calculator-style arithmetic, date calculation, unit conversion, chart policy,
+and reviewed tool/API calls. Ordinary common-sense questions such as “why does
+water freeze?” or “what is the difference between Python and Java?” should fall
+through to LLM reasoning instead of asking for business fields or API
+configuration.
+
+Ask routing is guarded by a routing policy: common knowledge and personal advice
+must answer or use Skills, external live information must use Tools/Search, and
+`need_more_info` is reserved for missing business context, data, API
+configuration, or failed/unsafe tool paths.

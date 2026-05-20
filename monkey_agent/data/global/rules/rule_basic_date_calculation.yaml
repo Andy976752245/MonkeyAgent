@@ -1,0 +1,21 @@
+id: rule_basic_date_calculation
+type: date
+name: 通用日期推算规则
+intent:
+  - date_calculation
+keywords:
+  - 今天
+  - 明天
+  - 后天
+  - 昨天
+  - 下周
+  - 天后
+  - 相差几天
+  - 多少天
+priority: 80
+status: active
+handler: date_calculation
+output_format: date
+rule: |
+  对常见日期相对表达和两个明确日期之间的天数差执行确定性计算。
+source: manual_seed

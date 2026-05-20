@@ -1,0 +1,22 @@
+id: rule_basic_arithmetic
+type: formula
+name: 通用四则运算规则
+intent:
+  - calculation
+keywords:
+  - "+"
+  - "-"
+  - "*"
+  - "/"
+  - "×"
+  - "÷"
+  - 等于几
+  - 帮我算
+  - 计算
+priority: 80
+status: active
+handler: arithmetic_formula
+output_format: number
+rule: |
+  对只包含数字、括号和四则运算符的表达式执行确定性计算。不得执行函数、变量、文件、代码或外部命令。
+source: manual_seed

@@ -10,6 +10,7 @@ class AgentState(TypedDict, total=False):
     task_type: str
     intent_keywords: list[str]
     classification: dict[str, Any]
+    routing_policy: dict[str, Any]
     keyword_classification: dict[str, Any]
     llm_classification: dict[str, Any]
     classification_adopted: bool

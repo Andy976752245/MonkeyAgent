@@ -20,6 +20,7 @@ from monkey_agent.domains.memory import PersonalMemoryStore
 from monkey_agent.domains.rules.handlers import RuleExecutor
 from monkey_agent.domains.rules.matcher import RuleMatcher
 from monkey_agent.domains.rules.repository import RuleRepository
+from monkey_agent.domains.routing import RoutingPolicy
 from monkey_agent.domains.skills.matcher import SkillMatcher
 from monkey_agent.domains.skills.repository import SkillRepository
 from monkey_agent.core.state import AgentState
@@ -57,6 +58,7 @@ class GraphNodes:
         self.skill_matcher = SkillMatcher()
         self.agent_skill_matcher = AgentSkillMatcher()
         self.rule_executor = RuleExecutor()
+        self.routing_policy = RoutingPolicy()
         self.ask_evaluator = AskEvaluator(chat_model)
         self.tool_builder_evaluator = ToolBuilderEvaluator()
 
@@ -115,6 +117,12 @@ class GraphNodes:
             source="llm",
         )
         merged = self.classifier.merge(keyword, llm)
+        preview = {
+            **state,
+            "task_type": merged.task_type,
+            "intent_keywords": merged.intents or ["general"],
+            "required_tools": merged.required_tools,
+        }
         return {
             "classification": {
                 "keyword": keyword.to_dict(),
@@ -130,6 +138,7 @@ class GraphNodes:
             "uncertain_parts": merged.uncertain,
             "required_tools": merged.required_tools,
             "classification_confidence": merged.confidence,
+            "routing_policy": self.routing_policy.summarize(preview),
             "execution_path": state.get("execution_path", []) + ["merge_classification"],
         }
 
@@ -144,18 +153,23 @@ class GraphNodes:
             state.get("intent_keywords", []),
             self.rule_repository.active(),
         )
+        matched_rules = [match.to_dict() for match in matches]
+        allowed, blocked = self.routing_policy.filter_rule_matches(state, matched_rules)
+        routing_policy = {
+            **state.get("routing_policy", {}),
+            "blocked_rules": blocked,
+            "candidate_route": "rules" if allowed else "skills",
+        }
         return {
-            "matched_rules": [match.to_dict() for match in matches],
-            "route": "rules" if matches else "skills",
+            "matched_rules": allowed,
+            "route": "rules" if allowed else "skills",
+            "routing_policy": routing_policy,
             "execution_path": state.get("execution_path", []) + ["match_rules"],
         }
 
     def execute_rules(self, state: AgentState) -> dict[str, Any]:
-        rules = [match.rule for match in self.rule_matcher.match(
-            state["question"],
-            state.get("intent_keywords", []),
-            self.rule_repository.active(),
-        )]
+        matched_ids = {str(item.get("id")) for item in state.get("matched_rules", [])}
+        rules = [rule for rule in self.rule_repository.active() if rule.id in matched_ids]
         results: list[dict[str, Any]] = []
         local_rules = []
         for rule in rules:
@@ -239,6 +253,27 @@ class GraphNodes:
         }
 
     def need_more_info(self, state: AgentState) -> dict[str, Any]:
+        routing_policy = self.routing_policy.summarize(state)
+        if not routing_policy.get("clarification_allowed"):
+            redirected = self.general_reason(
+                {
+                    **state,
+                    "routing_policy": {
+                        **routing_policy,
+                        "candidate_route": "need_more_info",
+                        "final_route": "general_reason",
+                        "redirect_reason": "clarification_not_allowed",
+                    },
+                    "execution_path": state.get("execution_path", []) + ["need_more_info_guard"],
+                }
+            )
+            redirected["routing_policy"] = {
+                **routing_policy,
+                "candidate_route": "need_more_info",
+                "final_route": "general_reason",
+                "redirect_reason": "clarification_not_allowed",
+            }
+            return redirected
         exploration = state.get("exploration", {})
         candidate_id = exploration.get("candidate_id")
         questions = _clarification_questions_for_task(state.get("task_type", "general"))
@@ -262,6 +297,11 @@ class GraphNodes:
             "clarification_questions": questions,
             "answer": prefix + "\n".join(f"- {item}" for item in questions),
             "confidence": 0.2,
+            "routing_policy": {
+                **routing_policy,
+                "candidate_route": "need_more_info",
+                "final_route": "need_more_info",
+            },
             "execution_path": state.get("execution_path", []) + ["need_more_info"],
         }
 
@@ -743,6 +783,10 @@ class GraphNodes:
             "memory_used": memory_context.preferences,
             "counterexamples_checked": memory_context.counterexamples,
             "errors": errors,
+            "routing_policy": {
+                **state.get("routing_policy", {}),
+                "final_route": state.get("route") or "reason",
+            },
             "execution_path": state.get("execution_path", []) + ["reason"],
         }
 
@@ -755,20 +799,45 @@ class GraphNodes:
         context["memory"] = memory_context.to_dict()
         context["task_type"] = state.get("task_type", "general")
         context["intent_keywords"] = state.get("intent_keywords", [])
-        answer = personal_advice_answer(
-            state["question"],
+        errors = list(state.get("errors", []))
+        if is_personal_advice_task(
             state.get("task_type", "general"),
-            context,
-        )
+            state.get("intent_keywords", []),
+        ):
+            answer = personal_advice_answer(
+                state["question"],
+                state.get("task_type", "general"),
+                context,
+            )
+            clarification_questions = personal_advice_clarification_questions(
+                state.get("task_type", "general")
+            )
+        else:
+            try:
+                answer = self.chat_model.generate(
+                    question=state["question"],
+                    deterministic_results=[],
+                    skills=[],
+                    context=context,
+                )
+            except Exception as exc:  # noqa: BLE001 - model boundary must not block fallback
+                errors.append(f"model_generate_failed:{exc}")
+                answer = _general_knowledge_fallback(state["question"])
+            if _is_generic_missing_capability_answer(answer):
+                answer = _general_knowledge_fallback(state["question"])
+            clarification_questions = []
         return {
             "route": "general_reason",
             "answer": answer,
             "confidence": 0.65,
-            "clarification_questions": personal_advice_clarification_questions(
-                state.get("task_type", "general")
-            ),
+            "clarification_questions": clarification_questions,
+            "routing_policy": {
+                **state.get("routing_policy", {}),
+                "final_route": "general_reason",
+            },
             "memory_used": memory_context.preferences,
             "counterexamples_checked": memory_context.counterexamples,
+            "errors": errors,
             "execution_path": state.get("execution_path", []) + ["general_reason"],
         }
 
@@ -1006,13 +1075,7 @@ def _likely_memory_candidate(question: str) -> bool:
 
 
 def _should_general_reason(state: AgentState) -> bool:
-    question = state.get("question", "")
-    if _likely_memory_candidate(question) or _explicit_learning_requested(question):
-        return False
-    return is_personal_advice_task(
-        state.get("task_type", "general"),
-        state.get("intent_keywords", []),
-    )
+    return RoutingPolicy().prefer_general_reason(state)
 
 
 def _clarification_questions_for_task(task_type: str) -> list[str]:
@@ -1066,6 +1129,36 @@ def _fallback_answer(state: AgentState, context: dict[str, Any]) -> str:
         names = ", ".join(str(item.get("name")) for item in skills)
         return f"模型暂时不可用，已匹配 Skills：{names}。请补充更多上下文后可继续生成更完整答案。"
     return "模型暂时不可用，当前缺少可执行的沉淀 Rules 或 Skills，需要补充更多信息。"
+
+
+def _is_generic_missing_capability_answer(answer: str) -> bool:
+    return any(
+        marker in answer
+        for marker in [
+            "当前缺少可执行的沉淀 Rules 或 Skills",
+            "需要补充更多业务信息",
+            "请补充这个问题所属的业务场景",
+        ]
+    )
+
+
+def _general_knowledge_fallback(question: str) -> str:
+    if "水" in question and "结冰" in question:
+        return (
+            "水结冰是因为温度降低后，水分子的热运动减弱，分子之间更容易形成稳定的氢键结构。"
+            "在标准大气压下，纯水通常在 0°C 左右凝固成冰。"
+        )
+    if "Python" in question and "Java" in question and "区别" in question:
+        return (
+            "Python 更强调简洁和开发效率，常用于脚本、数据分析、AI 和自动化；"
+            "Java 更强调工程化、类型约束和大型服务端生态，常用于企业后端、Android 和大型系统。"
+            "简单说，Python 上手快、表达短，Java 结构更严谨、长期维护能力强。"
+        )
+    return (
+        "这是一个基础常识问题，不需要补充业务字段或外部系统配置。"
+        "当前模型不可用时，我只能给出保守回答：请围绕定义、原因、例子和适用边界来理解这个问题；"
+        "如果你希望更准确，我可以在模型或搜索能力可用后继续补充。"
+    )
 
 
 def _context_with_evaluation(

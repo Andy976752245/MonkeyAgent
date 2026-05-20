@@ -174,11 +174,15 @@ Goal Engine 适合较大的目标，例如：
 
 Rules 用于确定性能力，包括：
 
-- 百分比、日期、计算公式。
+- 百分比、基础四则运算、日期推算、单位换算等可验证计算。
 - 固定业务口径。
 - 图表规则。
 - 已审核 API Tool Rule。
 - 已沉淀 Generated Tool 的调用规则。
+
+基础常识问题不作为单问单答 Rule 库维护；没有固定业务口径时，MonkeyAgent 应走 LLM 常识回答，并避免返回“字段定义/API 配置”类澄清模板。
+
+常规问题路由由 Routing Policy 统一护航：确定性基础问题走 Rules，常识/建议问题走 LLM 或 Skills，外部实时信息走 Tools/Search，只有缺数据、缺口径、缺鉴权或工具失败时才进入 `need_more_info`。
 
 典型命令：
 

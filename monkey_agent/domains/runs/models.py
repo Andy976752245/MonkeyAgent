@@ -16,6 +16,7 @@ class RunRecord:
     route: str = ""
     execution_path: list[str] = field(default_factory=list)
     classification: dict[str, Any] = field(default_factory=dict)
+    routing_policy: dict[str, Any] = field(default_factory=dict)
     matched_rules: list[dict[str, Any]] = field(default_factory=list)
     matched_skills: list[dict[str, Any]] = field(default_factory=list)
     tools: list[dict[str, Any]] = field(default_factory=list)
@@ -40,6 +41,7 @@ class RunRecord:
             "route": self.route,
             "execution_path": self.execution_path,
             "classification": self.classification,
+            "routing_policy": self.routing_policy,
             "matched_rules": self.matched_rules,
             "matched_skills": self.matched_skills,
             "tools": self.tools,
@@ -66,6 +68,7 @@ class RunRecord:
             route=str(data.get("route") or ""),
             execution_path=[str(item) for item in data.get("execution_path", [])],
             classification=dict(data.get("classification") or {}),
+            routing_policy=dict(data.get("routing_policy") or {}),
             matched_rules=_dict_list(data.get("matched_rules")),
             matched_skills=_dict_list(data.get("matched_skills")),
             tools=_dict_list(data.get("tools")),

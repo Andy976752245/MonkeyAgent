@@ -1,0 +1,24 @@
+id: rule_basic_unit_conversion
+type: unit_conversion
+name: 通用单位换算规则
+intent:
+  - unit_conversion
+keywords:
+  - 换算
+  - 转换
+  - 等于多少
+  - 公里
+  - 千米
+  - 米
+  - 千克
+  - 公斤
+  - 克
+  - 摄氏
+  - 华氏
+priority: 80
+status: active
+handler: unit_conversion
+output_format: unit
+rule: |
+  对常见长度、重量、容量和摄氏/华氏温度执行确定性单位换算。
+source: manual_seed

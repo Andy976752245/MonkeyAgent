@@ -24,7 +24,7 @@ class QuestionClassifier:
 
         if re.search(r"\d", question):
             deterministic.append("numeric")
-        if any(word in question for word in ["公式", "计算", "百分比", "日期"]):
+        if any(word in question for word in ["公式", "计算", "百分比", "日期", "几天", "换算", "转换"]):
             deterministic.append("rule_candidate")
         if any(word in question for word in ["案例", "历史", "知识库", "经验", "Skill", "月报", "分析"]):
             semi_deterministic.append("rag_or_skill_candidate")
@@ -39,9 +39,11 @@ class QuestionClassifier:
             semi_deterministic.append("public_search")
         if set(intents) & PERSONAL_ADVICE_INTENTS:
             semi_deterministic.append("personal_assistant_skill_candidate")
+        if "general_knowledge" in intents:
+            uncertain.append("llm_reasoning_candidate")
         if any(word in question for word in ["判断", "推理", "可能", "为什么", "建议"]):
             uncertain.append("llm_reasoning_candidate")
-        if not deterministic and not semi_deterministic:
+        if not deterministic and not semi_deterministic and "general_knowledge" not in intents:
             uncertain.append("human_confirmation_required")
 
         confidence = 0.85 if intents != ["general"] else 0.55
@@ -119,6 +121,8 @@ def _intent_keywords(question: str) -> list[str]:
     mapping = {
         "chart": ["图表", "趋势", "折线图", "柱状图", "环比", "同比"],
         "calculation": ["计算", "公式", "百分比", "%"],
+        "date_calculation": ["今天", "明天", "后天", "昨天", "下周", "天后", "相差几天", "多少天"],
+        "unit_conversion": ["换算", "转换", "等于多少", "是多少", "公里", "千米", "千克", "公斤", "摄氏", "华氏"],
         "report_writing": ["周报", "月报", "总结", "汇报", "复盘"],
         "sales_support": ["销售", "拜访", "客户", "甲方", "乙方", "商机"],
         "meeting_preparation": ["会议", "会前", "参会", "议程", "主持", "启动会"],
@@ -128,11 +132,14 @@ def _intent_keywords(question: str) -> list[str]:
         "weather_query": ["天气", "气温", "降水", "风速"],
         "integration": ["飞书", "Lark", "对接", "消息", "发送"],
         "sports_query": ["NBA", "比赛", "赛程", "球队", "赛事"],
+        "general_knowledge": ["为什么", "是什么", "什么是", "区别", "介绍", "原理", "怎么用"],
     }
     found: list[str] = []
     for intent, words in mapping.items():
         if any(word in question for word in words):
             found.append(intent)
+    if _looks_like_arithmetic(question) and "calculation" not in found:
+        found.append("calculation")
     return found or ["general"]
 
 
@@ -149,10 +156,27 @@ def _task_type(intents: list[str]) -> str:
         ("weather_query", "weather_query"),
         ("integration", "integration"),
         ("sports_query", "sports_query"),
+        ("date_calculation", "date_calculation"),
+        ("unit_conversion", "unit_conversion"),
+        ("general_knowledge", "general_knowledge"),
     ]:
         if intent in intents:
             return task_type
     return "general"
+
+
+def _looks_like_arithmetic(question: str) -> bool:
+    question = re.sub(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}", " ", question)
+    normalized = (
+        question.replace("（", "(")
+        .replace("）", ")")
+        .replace("×", "*")
+        .replace("÷", "/")
+    )
+    return bool(
+        re.search(r"\d", normalized)
+        and re.search(r"\d\s*[\+\-\*/]\s*\d|\([0-9\+\-\*/\.\s]+\)", normalized)
+    )
 
 
 def _dedupe(values: list[str]) -> list[str]:
