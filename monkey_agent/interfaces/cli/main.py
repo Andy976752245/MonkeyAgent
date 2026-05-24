@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import platform
 from typing import Any
+from pathlib import Path
 
 from monkey_agent.app import MonkeyAgent
 
@@ -15,10 +18,28 @@ def main(argv: list[str] | None = None) -> None:
     ask_parser.add_argument("question")
     ask_parser.add_argument("--context", default="{}")
     ask_parser.add_argument("--feedback")
+    ask_parser.add_argument("--pretty", action="store_true")
+    ask_parser.add_argument("--trace", action="store_true")
+    ask_parser.add_argument("--debug", action="store_true")
 
     serve_parser = sub.add_parser("serve")
     serve_parser.add_argument("--host", default="0.0.0.0")
     serve_parser.add_argument("--port", type=int, default=8000)
+
+    doctor_parser = sub.add_parser("doctor")
+    doctor_parser.add_argument("--smoke", action="store_true")
+
+    quickstart_parser = sub.add_parser("quickstart")
+    quickstart_parser.add_argument("--debug", action="store_true")
+
+    chat_parser = sub.add_parser("chat")
+    chat_parser.add_argument("--trace", action="store_true")
+
+    telegram_parser = sub.add_parser("telegram")
+    telegram_sub = telegram_parser.add_subparsers(dest="telegram_command", required=True)
+    telegram_start = telegram_sub.add_parser("start")
+    telegram_start.add_argument("--trace", action="store_true")
+    telegram_start.add_argument("--once", action="store_true")
 
     rules_parser = sub.add_parser("rules")
     rules_sub = rules_parser.add_subparsers(dest="rules_command", required=True)
@@ -78,6 +99,9 @@ def main(argv: list[str] | None = None) -> None:
     review_parser = sub.add_parser("review")
     review_sub = review_parser.add_subparsers(dest="review_command", required=True)
     review_sub.add_parser("list")
+    review_sub.add_parser("latest")
+    review_inspect = review_sub.add_parser("inspect")
+    review_inspect.add_argument("candidate_id")
     approve = review_sub.add_parser("approve")
     approve.add_argument("candidate_id")
     reject = review_sub.add_parser("reject")
@@ -144,7 +168,16 @@ def main(argv: list[str] | None = None) -> None:
             context=context,
             feedback=args.feedback,
         )
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        _print_ask_result(result, debug=args.debug, trace=args.trace)
+    elif args.command == "doctor":
+        _print_doctor(_run_doctor(agent, smoke=args.smoke))
+    elif args.command == "quickstart":
+        _print_quickstart(_run_quickstart(agent), debug=args.debug)
+    elif args.command == "chat":
+        _run_chat(agent, trace=args.trace)
+    elif args.command == "telegram":
+        if args.telegram_command == "start":
+            _run_telegram(agent, trace=args.trace, once=args.once)
     elif args.command == "rules":
         print(json.dumps(agent.list_rules(), ensure_ascii=False, indent=2))
     elif args.command == "skills":
@@ -185,15 +218,30 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "review":
         if args.review_command == "list":
             print(json.dumps(agent.list_pending(), ensure_ascii=False, indent=2))
+        elif args.review_command == "latest":
+            latest = agent.latest_pending()
+            _print_pending(latest)
+        elif args.review_command == "inspect":
+            item = agent.inspect_pending(args.candidate_id)
+            _print_pending(item)
         elif args.review_command == "approve":
-            path = agent.approve(args.candidate_id)
-            print(str(path))
+            try:
+                path = agent.approve(args.candidate_id)
+                print(str(path))
+            except FileNotFoundError as exc:
+                _print_pending_error(args.candidate_id, exc)
         elif args.review_command == "reject":
-            path = agent.reject(args.candidate_id)
-            print(str(path))
+            try:
+                path = agent.reject(args.candidate_id)
+                print(str(path))
+            except FileNotFoundError as exc:
+                _print_pending_error(args.candidate_id, exc)
     elif args.command == "adopt":
-        path = agent.adopt(args.candidate_id)
-        print(path)
+        try:
+            path = agent.adopt(args.candidate_id)
+            print(path)
+        except FileNotFoundError as exc:
+            _print_pending_error(args.candidate_id, exc)
     elif args.command == "goal":
         if args.goal_command == "start":
             context = _load_json(args.context)
@@ -275,6 +323,254 @@ def _load_json(value: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("--context must be a JSON object")
     return data
+
+
+def _print_ask_result(result: dict[str, Any], debug: bool = False, trace: bool = False) -> None:
+    if debug:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if trace:
+        print(_format_trace(result))
+        return
+    answer = str(result.get("answer") or "").strip()
+    print(answer or "没有生成回答。")
+    adoption_prompt = result.get("adoption_prompt")
+    if adoption_prompt:
+        print()
+        print(str(adoption_prompt))
+
+
+def _format_trace(result: dict[str, Any]) -> str:
+    lines = [f"答案：{str(result.get('answer') or '').strip() or '没有生成回答。'}", ""]
+    lines.append(f"路由：{result.get('route') or 'unknown'}")
+    rules = result.get("matched_rules") or []
+    if rules:
+        lines.append("命中规则：" + ", ".join(str(item.get("name") or item.get("id")) for item in rules))
+    skills = result.get("matched_skills") or []
+    if skills:
+        lines.append("命中技能：" + ", ".join(str(item.get("name") or item.get("id")) for item in skills))
+    exploration = result.get("exploration") or {}
+    if exploration.get("tool_id"):
+        lines.append(f"工具：{exploration.get('tool_name') or exploration.get('tool_id')}")
+    evaluation = result.get("evaluation") or {}
+    if evaluation:
+        lines.append(
+            "评估："
+            + str(evaluation.get("status") or "unknown")
+            + f" score={evaluation.get('score', '')}"
+        )
+    lines.append(f"置信度：{result.get('confidence', 0.0)}")
+    if result.get("run_id"):
+        lines.append(f"Run ID：{result['run_id']}")
+    if result.get("tool_run_id"):
+        lines.append(f"Tool Run ID：{result['tool_run_id']}")
+    routing = result.get("routing_policy") or {}
+    if routing:
+        lines.append(f"路由策略：{routing.get('category')} / clarification_allowed={routing.get('clarification_allowed')}")
+    return "\n".join(lines)
+
+
+def _run_doctor(agent: MonkeyAgent, smoke: bool = False) -> list[dict[str, str]]:
+    checks: list[dict[str, str]] = []
+    checks.append(_check("Python", "PASS", platform.python_version()))
+    runtime = agent.personal_workspace.root
+    checks.append(_check_path("Runtime", runtime, writable=True))
+    checks.append(_check_path("Global rules", agent.settings.rules_dir, writable=False))
+    checks.append(_check_path("Global skills", agent.settings.skills_dir, writable=False))
+    env_path = Path.cwd() / ".env"
+    checks.append(_check(".env", "PASS" if env_path.exists() else "WARN", str(env_path) if env_path.exists() else "not found"))
+    api_key = agent.settings.dashscope_api_key or os.getenv("DASHSCOPE_API_KEY", "")
+    checks.append(_check("DASHSCOPE_API_KEY", "PASS" if api_key else "WARN", "configured" if api_key else "not configured; local fallback may be used"))
+    backend = getattr(agent.goal_workflow, "checkpoint_backend", "unknown")
+    checks.append(_check("Goal checkpoint", "PASS" if backend == "sqlite" else "WARN", str(backend)))
+    feishu_missing = [
+        name
+        for name, value in [
+            ("FEISHU_APP_ID", agent.settings.feishu_app_id),
+            ("FEISHU_APP_SECRET", agent.settings.feishu_app_secret),
+        ]
+        if not value
+    ]
+    checks.append(_check("Feishu", "WARN" if feishu_missing else "PASS", "optional missing: " + ", ".join(feishu_missing) if feishu_missing else "configured"))
+    telegram_detail = (
+        "configured"
+        if agent.settings.telegram_bot_token and agent.settings.telegram_allowed_chat_ids
+        else "optional missing: TELEGRAM_BOT_TOKEN or TELEGRAM_ALLOWED_CHAT_IDS"
+    )
+    checks.append(
+        _check(
+            "Telegram",
+            "PASS"
+            if agent.settings.telegram_bot_token and agent.settings.telegram_allowed_chat_ids
+            else "WARN",
+            telegram_detail,
+        )
+    )
+    if smoke and api_key:
+        for role in ["chat", "classifier", "reasoning", "tool_builder", "evaluator"]:
+            checks.append(_model_smoke_check(agent, role))
+    elif smoke:
+        checks.append(_check("Model smoke", "WARN", "skipped because DASHSCOPE_API_KEY is not configured"))
+    return checks
+
+
+def _check_path(name: str, path: Path, writable: bool) -> dict[str, str]:
+    if not path.exists():
+        return _check(name, "FAIL", f"not found: {path}")
+    if writable:
+        try:
+            probe = path / ".doctor_write_test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+        except OSError as exc:
+            return _check(name, "FAIL", f"not writable: {exc}")
+    return _check(name, "PASS", str(path))
+
+
+def _model_smoke_check(agent: MonkeyAgent, role: str) -> dict[str, str]:
+    try:
+        if role in {"chat", "reasoning", "evaluator"}:
+            agent.chat_model.smoke(role)
+        elif role == "classifier":
+            agent.chat_model.classify_question("明天上海天气怎么样？", {})
+        elif role == "tool_builder":
+            agent.chat_model.draft_tool_builder(
+                "生成一个只读查询工具",
+                {
+                    "tool_id": "doctor_smoke_tool",
+                    "name": "Doctor Smoke Tool",
+                    "kind": "python_function",
+                    "permission": "auto",
+                    "risk": "low",
+                    "read_only": True,
+                    "keywords": ["查询"],
+                },
+                {},
+                {},
+            )
+    except Exception as exc:  # noqa: BLE001 - CLI diagnostics should report all roles
+        return _check(f"Model {role}", "FAIL", str(exc))
+    return _check(f"Model {role}", "PASS", "ok")
+
+
+def _check(name: str, status: str, detail: str) -> dict[str, str]:
+    return {"name": name, "status": status, "detail": detail}
+
+
+def _print_doctor(checks: list[dict[str, str]]) -> None:
+    print("MonkeyAgent Doctor")
+    for item in checks:
+        print(f"[{item['status']}] {item['name']}: {item['detail']}")
+    failed = sum(1 for item in checks if item["status"] == "FAIL")
+    warned = sum(1 for item in checks if item["status"] == "WARN")
+    passed = sum(1 for item in checks if item["status"] == "PASS")
+    print(f"\nSummary: PASS={passed} WARN={warned} FAIL={failed}")
+
+
+def _run_quickstart(agent: MonkeyAgent) -> list[dict[str, Any]]:
+    scenarios = [
+        ("基础计算", "1+1等于几", lambda r: r.get("route") == "rules"),
+        ("日期推算", "明天是几号", lambda r: r.get("route") == "rules"),
+        ("常识回答", "水为什么会结冰", lambda r: r.get("route") == "general_reason"),
+        ("个人助理建议", "我明天拜访客户应该准备什么", lambda r: r.get("route") in {"skills", "general_reason"}),
+        ("记忆候选", "以后默认用表格输出，这是我的偏好", lambda r: bool(r.get("learning_candidate_id") or r.get("adoption_prompt") or r.get("exploration"))),
+    ]
+    results: list[dict[str, Any]] = []
+    for name, question, predicate in scenarios:
+        try:
+            result = agent.ask(question)
+            ok = bool(predicate(result))
+            results.append(
+                {
+                    "name": name,
+                    "question": question,
+                    "status": "PASS" if ok else "WARN",
+                    "route": result.get("route"),
+                    "run_id": result.get("run_id"),
+                    "answer": result.get("answer", ""),
+                    "result": result,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - quickstart should continue
+            results.append({"name": name, "question": question, "status": "FAIL", "error": str(exc)})
+    return results
+
+
+def _print_quickstart(results: list[dict[str, Any]], debug: bool = False) -> None:
+    if debug:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return
+    print("MonkeyAgent Quickstart")
+    for item in results:
+        print(f"[{item['status']}] {item['name']}: {item['question']}")
+        if item.get("route"):
+            print(f"  route={item['route']} run_id={item.get('run_id')}")
+        if item.get("error"):
+            print(f"  error={item['error']}")
+    passed = sum(1 for item in results if item["status"] == "PASS")
+    warned = sum(1 for item in results if item["status"] == "WARN")
+    failed = sum(1 for item in results if item["status"] == "FAIL")
+    print(f"\nSummary: PASS={passed} WARN={warned} FAIL={failed}")
+
+
+def _run_chat(agent: MonkeyAgent, trace: bool = False) -> None:
+    print("MonkeyAgent Chat. Type exit or quit to leave.")
+    while True:
+        try:
+            question = input("> ").strip()
+        except EOFError:
+            print()
+            return
+        if not question:
+            continue
+        if question.lower() in {"exit", "quit"}:
+            return
+        result = agent.ask(question)
+        _print_ask_result(result, trace=trace)
+
+
+def _run_telegram(agent: MonkeyAgent, trace: bool = False, once: bool = False) -> None:
+    if not agent.settings.telegram_bot_token:
+        print("TELEGRAM_BOT_TOKEN is not configured. Create a bot with BotFather and add the token to .env.")
+        return
+    from monkey_agent.domains.integrations.telegram import (
+        TelegramClient,
+        TelegramMessageHandler,
+        TelegramPollingRunner,
+    )
+
+    client = TelegramClient(
+        agent.settings.telegram_bot_token,
+        request_timeout=agent.settings.telegram_request_timeout,
+    )
+    handler = TelegramMessageHandler(
+        agent.settings,
+        lambda question, context: agent.ask(question, context=context),
+        client,
+        trace_default=trace,
+    )
+    runner = TelegramPollingRunner(agent.settings, client, handler)
+    mode = "once" if once else "polling"
+    print(f"MonkeyAgent Telegram {mode} started.")
+    if not agent.settings.telegram_allowed_chat_ids:
+        print("Setup mode: only /start and /whoami are enabled until TELEGRAM_ALLOWED_CHAT_IDS is configured.")
+    result = runner.run(once=once)
+    if once or result.get("status") != "stopped":
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def _print_pending(item: dict[str, Any] | None) -> None:
+    if not item:
+        print("当前没有待审核候选。")
+        return
+    print(json.dumps(item, ensure_ascii=False, indent=2))
+
+
+def _print_pending_error(candidate_id: str, exc: FileNotFoundError) -> None:
+    if candidate_id == "latest":
+        print("当前没有待审核候选。")
+        return
+    print(str(exc))
 
 
 if __name__ == "__main__":

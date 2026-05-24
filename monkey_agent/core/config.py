@@ -73,6 +73,11 @@ class Settings:
     feishu_allowed_users: list[str]
     feishu_allowed_chats: list[str]
     feishu_default_user_prefix: str
+    telegram_bot_token: str
+    telegram_allowed_chat_ids: list[str]
+    telegram_poll_timeout: int
+    telegram_poll_interval: float
+    telegram_request_timeout: int
 
 
 def load_settings() -> Settings:
@@ -137,6 +142,11 @@ def load_settings() -> Settings:
         feishu_allowed_users=_csv(os.getenv("FEISHU_ALLOWED_USERS", "")),
         feishu_allowed_chats=_csv(os.getenv("FEISHU_ALLOWED_CHATS", "")),
         feishu_default_user_prefix=os.getenv("FEISHU_DEFAULT_USER_PREFIX", "feishu"),
+        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+        telegram_allowed_chat_ids=_csv(os.getenv("TELEGRAM_ALLOWED_CHAT_IDS", "")),
+        telegram_poll_timeout=int(os.getenv("TELEGRAM_POLL_TIMEOUT", "25")),
+        telegram_poll_interval=float(os.getenv("TELEGRAM_POLL_INTERVAL", "1")),
+        telegram_request_timeout=int(os.getenv("TELEGRAM_REQUEST_TIMEOUT", "30")),
     )
 
 

@@ -51,6 +51,16 @@ class ReviewStore:
             return None
         return max(items, key=lambda item: Path(str(item["_path"])).stat().st_mtime)
 
+    def inspect_pending(self, candidate_id: str) -> dict[str, Any] | None:
+        try:
+            path = self._find_candidate(candidate_id)
+        except FileNotFoundError:
+            return None
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data["_path"] = str(path)
+        data["candidate_kind"] = _singular(path.parent.name)
+        return data
+
     def create_candidate(
         self,
         question: str,

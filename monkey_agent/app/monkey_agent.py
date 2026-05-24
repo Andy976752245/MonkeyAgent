@@ -159,7 +159,7 @@ class MonkeyAgent:
         return self.review_store.create_candidate(question, feedback, context)
 
     def adopt(self, candidate_id: str) -> str:
-        return str(self.review_store.approve(candidate_id))
+        return str(self.review_store.approve(self._resolve_candidate_id(candidate_id)))
 
     def list_rules(self) -> list[dict[str, Any]]:
         return [item.to_dict() for item in self.rules.list()]
@@ -241,11 +241,30 @@ class MonkeyAgent:
     def list_pending(self) -> list[dict[str, Any]]:
         return self.review_store.list_pending()
 
+    def latest_pending(self) -> dict[str, Any] | None:
+        return self.review_store.latest_pending()
+
+    def inspect_pending(self, candidate_id: str) -> dict[str, Any] | None:
+        if candidate_id == "latest":
+            latest = self.review_store.latest_pending()
+            if not latest:
+                return None
+            candidate_id = str(latest["id"])
+        return self.review_store.inspect_pending(candidate_id)
+
     def approve(self, candidate_id: str) -> str:
-        return str(self.review_store.approve(candidate_id))
+        return str(self.review_store.approve(self._resolve_candidate_id(candidate_id)))
 
     def reject(self, candidate_id: str) -> str:
-        return str(self.review_store.reject(candidate_id))
+        return str(self.review_store.reject(self._resolve_candidate_id(candidate_id)))
+
+    def _resolve_candidate_id(self, candidate_id: str) -> str:
+        if candidate_id != "latest":
+            return candidate_id
+        latest = self.review_store.latest_pending()
+        if not latest:
+            raise FileNotFoundError("pending candidate not found: latest")
+        return str(latest["id"])
 
     def start_goal(
         self,

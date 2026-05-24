@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 import tempfile
 import unittest
@@ -13,11 +15,22 @@ from monkey_agent.domains.tools.capability import CapabilityRegistry, ToolResult
 from monkey_agent.app.monkey_agent import MonkeyAgent
 from monkey_agent.domains.integrations.feishu import FeishuEventHandler
 from monkey_agent.domains.integrations.feishu.security import FeishuSecurityError
+from monkey_agent.domains.integrations.telegram import (
+    TelegramMessageHandler,
+    TelegramPollingRunner,
+)
+from monkey_agent.domains.integrations.telegram.handler import split_telegram_text
 from monkey_agent.domains.tools.builtin.weather import _location_candidates
 from monkey_agent.core.config import Settings
 from monkey_agent.domains.goals.models import GoalTask
 from monkey_agent.domains.models.bailian import BailianChatModel, LocalHeuristicModel
 from monkey_agent.domains.evaluation import AskEvaluator
+from monkey_agent.interfaces.cli.main import (
+    _print_ask_result,
+    _run_chat,
+    _run_doctor,
+    _run_quickstart,
+)
 from monkey_agent.workflows.goal.planner import CompositeGoalPlanner
 
 
@@ -86,6 +99,11 @@ def settings_for(tmp: Path) -> Settings:
         feishu_allowed_users=[],
         feishu_allowed_chats=[],
         feishu_default_user_prefix="feishu",
+        telegram_bot_token="",
+        telegram_allowed_chat_ids=[],
+        telegram_poll_timeout=25,
+        telegram_poll_interval=0,
+        telegram_request_timeout=30,
     )
 
 
@@ -1808,6 +1826,256 @@ class MonkeyAgentRulesFirstTest(unittest.TestCase):
             self.assertEqual(model.model_for_role("evaluator"), "qwen-evaluator")
             self.assertEqual(model.model_for_role("unknown"), "qwen-plus")
 
+    def test_cli_ask_formatter_defaults_to_answer_only(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            _print_ask_result(
+                {
+                    "answer": "2",
+                    "route": "rules",
+                    "classification": {"task_type": "calculation"},
+                }
+            )
+        text = output.getvalue().strip()
+        self.assertEqual(text, "2")
+        self.assertNotIn("classification", text)
+
+    def test_cli_ask_formatter_debug_and_trace_modes(self) -> None:
+        result = {
+            "answer": "已完成计算。",
+            "route": "rules",
+            "classification": {"task_type": "calculation"},
+            "matched_rules": [{"id": "rule_basic_arithmetic", "name": "通用四则运算规则"}],
+            "evaluation": {"status": "pass", "score": 1.0},
+            "confidence": 0.95,
+            "run_id": "run_test",
+        }
+        debug_output = StringIO()
+        with redirect_stdout(debug_output):
+            _print_ask_result(result, debug=True)
+        self.assertIn('"classification"', debug_output.getvalue())
+
+        trace_output = StringIO()
+        with redirect_stdout(trace_output):
+            _print_ask_result(result, trace=True)
+        trace = trace_output.getvalue()
+        self.assertIn("答案：已完成计算。", trace)
+        self.assertIn("路由：rules", trace)
+        self.assertIn("Run ID：run_test", trace)
+
+    def test_review_latest_inspect_and_approve_latest(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            settings = settings_for(Path(raw))
+            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
+            candidate_id = agent.submit_feedback(
+                "输出格式",
+                "以后默认用表格输出，这是我的偏好。",
+            )
+            latest = agent.latest_pending()
+            self.assertIsNotNone(latest)
+            self.assertEqual(latest["id"], candidate_id)
+            inspected = agent.inspect_pending("latest")
+            self.assertIsNotNone(inspected)
+            self.assertEqual(inspected["id"], candidate_id)
+
+            promoted_path = Path(agent.approve("latest"))
+            self.assertTrue(promoted_path.exists())
+            self.assertIsNone(agent.latest_pending())
+            self.assertIsNone(agent.inspect_pending("latest"))
+
+    def test_doctor_warns_without_api_key(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            settings = settings_for(Path(raw))
+            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
+            checks = _run_doctor(agent, smoke=True)
+            statuses = {item["name"]: item["status"] for item in checks}
+            self.assertEqual(statuses["DASHSCOPE_API_KEY"], "WARN")
+            self.assertEqual(statuses["Model smoke"], "WARN")
+            self.assertFalse((settings.runtime_dir / "users").exists())
+
+    def test_quickstart_runs_core_scenarios(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            settings = settings_for(Path(raw))
+            write_basic_rules(settings.rules_dir)
+            (settings.skills_dir / "personal_advice.yaml").write_text(
+                yaml.safe_dump(
+                    {
+                        "id": "skill_personal_advice",
+                        "name": "个人助理建议 Skill",
+                        "description": "为拜访、会议、计划类问题提供建议。",
+                        "task_types": ["sales_support", "meeting_preparation"],
+                        "keywords": ["拜访", "客户", "准备", "建议"],
+                        "priority": 80,
+                        "status": "active",
+                        "prompt": "先给可执行建议，再询问必要背景。",
+                    },
+                    allow_unicode=True,
+                ),
+                encoding="utf-8",
+            )
+            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
+            results = _run_quickstart(agent)
+            self.assertEqual(len(results), 5)
+            self.assertFalse(any(item["status"] == "FAIL" for item in results))
+            self.assertTrue(all("run_id" in item for item in results if item["status"] != "FAIL"))
+
+    def test_chat_exits_cleanly_after_one_turn(self) -> None:
+        class DummyAgent:
+            def ask(self, question):
+                return {"answer": f"回答：{question}", "route": "general_reason"}
+
+        output = StringIO()
+        with patch("builtins.input", side_effect=["你好", "exit"]):
+            with redirect_stdout(output):
+                _run_chat(DummyAgent())
+        text = output.getvalue()
+        self.assertIn("MonkeyAgent Chat", text)
+        self.assertIn("回答：你好", text)
+
+    def test_telegram_setup_mode_allows_whoami_but_blocks_ask(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            settings = settings_for(Path(raw))
+            calls = []
+            client = FakeTelegramClient()
+            handler = TelegramMessageHandler(
+                settings,
+                lambda question, context: calls.append((question, context)) or {"answer": "ok"},
+                client,
+            )
+
+            whoami = handler.handle_update(_telegram_update("/whoami", chat_id=123))
+            self.assertEqual(whoami["status"], "replied")
+            self.assertIn("chat_id: 123", client.sent[-1]["text"])
+
+            blocked = handler.handle_update(_telegram_update("1+1等于几", chat_id=123))
+            self.assertEqual(blocked["status"], "setup_required")
+            self.assertEqual(calls, [])
+            self.assertIn("TELEGRAM_ALLOWED_CHAT_IDS=123", client.sent[-1]["text"])
+
+    def test_telegram_allowed_chat_invokes_agent_and_sends_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            settings = Settings(
+                **{
+                    **settings_for(Path(raw)).__dict__,
+                    "telegram_bot_token": "token",
+                    "telegram_allowed_chat_ids": ["123"],
+                }
+            )
+            calls = []
+            client = FakeTelegramClient()
+            handler = TelegramMessageHandler(
+                settings,
+                lambda question, context: calls.append((question, context))
+                or {"answer": "答案是 2", "route": "rules", "run_id": "run_1"},
+                client,
+            )
+
+            result = handler.handle_update(_telegram_update("1+1等于几", chat_id=123))
+            self.assertEqual(result["status"], "replied")
+            self.assertEqual(calls[0][0], "1+1等于几")
+            self.assertEqual(calls[0][1]["channel"], "telegram")
+            self.assertEqual(calls[0][1]["telegram_chat_id"], "123")
+            self.assertEqual(client.sent[-1]["text"], "答案是 2")
+
+    def test_telegram_rejects_non_whitelisted_chat(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            settings = Settings(
+                **{
+                    **settings_for(Path(raw)).__dict__,
+                    "telegram_bot_token": "token",
+                    "telegram_allowed_chat_ids": ["123"],
+                }
+            )
+            calls = []
+            client = FakeTelegramClient()
+            handler = TelegramMessageHandler(
+                settings,
+                lambda question, context: calls.append((question, context)) or {"answer": "ok"},
+                client,
+            )
+            result = handler.handle_update(_telegram_update("你好", chat_id=456))
+            self.assertEqual(result["status"], "ignored")
+            self.assertEqual(calls, [])
+            self.assertEqual(client.sent, [])
+
+    def test_telegram_trace_toggle_adds_route_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            settings = Settings(
+                **{
+                    **settings_for(Path(raw)).__dict__,
+                    "telegram_bot_token": "token",
+                    "telegram_allowed_chat_ids": ["123"],
+                }
+            )
+            client = FakeTelegramClient()
+            handler = TelegramMessageHandler(
+                settings,
+                lambda question, context: {
+                    "answer": "已计算",
+                    "route": "rules",
+                    "run_id": "run_1",
+                    "confidence": 0.9,
+                    "evaluation": {"status": "pass"},
+                },
+                client,
+            )
+            handler.handle_update(_telegram_update("/trace on", chat_id=123))
+            handler.handle_update(_telegram_update("1+1等于几", chat_id=123))
+            self.assertIn("route: rules", client.sent[-1]["text"])
+            self.assertIn("run_id: run_1", client.sent[-1]["text"])
+
+            handler.handle_update(_telegram_update("/trace off", chat_id=123))
+            handler.handle_update(_telegram_update("1+1等于几", chat_id=123))
+            self.assertEqual(client.sent[-1]["text"], "已计算")
+
+    def test_telegram_non_text_message_returns_text_only_notice(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            settings = Settings(
+                **{
+                    **settings_for(Path(raw)).__dict__,
+                    "telegram_bot_token": "token",
+                    "telegram_allowed_chat_ids": ["123"],
+                }
+            )
+            client = FakeTelegramClient()
+            handler = TelegramMessageHandler(settings, lambda question, context: {}, client)
+            result = handler.handle_update(
+                {
+                    "update_id": 1,
+                    "message": {
+                        "message_id": 7,
+                        "chat": {"id": 123, "type": "private"},
+                        "from": {"id": 99},
+                        "photo": [{"file_id": "x"}],
+                    },
+                }
+            )
+            self.assertEqual(result["reason"], "non_text_message")
+            self.assertEqual(client.sent[-1]["text"], "当前仅支持文本消息。")
+
+    def test_telegram_polling_once_processes_updates_and_advances_offset(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            settings = Settings(
+                **{
+                    **settings_for(Path(raw)).__dict__,
+                    "telegram_bot_token": "token",
+                    "telegram_allowed_chat_ids": ["123"],
+                }
+            )
+            client = FakeTelegramClient(updates=[_telegram_update("你好", chat_id=123, update_id=41)])
+            handler = TelegramMessageHandler(settings, lambda question, context: {"answer": "你好"}, client)
+            runner = TelegramPollingRunner(settings, client, handler)
+            result = runner.run(once=True)
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["processed"], 1)
+            self.assertEqual(runner.offset, 42)
+            self.assertEqual(client.sent[-1]["text"], "你好")
+
+    def test_telegram_split_reply_uses_telegram_limit(self) -> None:
+        chunks = split_telegram_text("x" * 4100)
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(len(chunks[0]), 4096)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -1921,3 +2189,33 @@ class UnsafeToolBuilderModel(LocalHeuristicModel):
 class FailingReasonModel(LocalHeuristicModel):
     def generate(self, question, deterministic_results, skills, context):
         raise RuntimeError("network unavailable")
+
+
+class FakeTelegramClient:
+    def __init__(self, updates=None):
+        self.updates = updates or []
+        self.sent = []
+        self.get_updates_calls = []
+
+    def get_updates(self, *, offset=None, timeout=25):
+        self.get_updates_calls.append({"offset": offset, "timeout": timeout})
+        updates = self.updates
+        self.updates = []
+        return updates
+
+    def send_message(self, *, chat_id, text, parse_mode=None):
+        item = {"chat_id": str(chat_id), "text": text, "parse_mode": parse_mode}
+        self.sent.append(item)
+        return {"ok": True, "result": item}
+
+
+def _telegram_update(text: str, chat_id: int, update_id: int = 1) -> dict:
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": 7,
+            "chat": {"id": chat_id, "type": "private"},
+            "from": {"id": 99},
+            "text": text,
+        },
+    }

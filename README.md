@@ -65,11 +65,21 @@ cp .env.bailian.example .env
 
 ## CLI
 
+`monkey ask` is optimized for day-to-day use: by default it prints only the
+natural-language answer. Use `--trace` when you want a compact route summary,
+and `--debug` when you need the full internal JSON state.
+
 ```bash
+monkey doctor
+monkey quickstart
+monkey chat
+monkey telegram start
+monkey telegram start --trace
 monkey ask "我作为乙方软件公司的销售，明天要去拜访甲方，我应该准备什么？"
-monkey ask "帮我总结今天的会议纪要，并输出行动项"
+monkey ask "1+1等于几"
+monkey ask "今天上海天气怎么样？" --trace
+monkey ask "帮我总结今天的会议纪要，并输出行动项" --debug
 monkey ask "以后默认用表格输出，这是我的偏好"
-monkey ask "今天上海天气怎么样？"
 monkey rules list
 monkey skills list --type all
 monkey skills install vercel-labs/skills --skill find-skills
@@ -98,10 +108,31 @@ monkey runs list
 monkey runs latest --type ask
 monkey runs inspect <run-id>
 monkey review list
+monkey review latest
+monkey review inspect latest
 monkey review approve <candidate-id>
+monkey review approve latest
 monkey adopt <candidate-id>
+monkey adopt latest
 monkey serve --port 8000
 ```
+
+Recommended first run:
+
+```bash
+monkey doctor
+monkey quickstart
+monkey chat
+```
+
+- `doctor` checks the local runtime, `.env`, Bailian key, checkpoint backend, and
+  optional Feishu configuration.
+- `quickstart` runs a small smoke suite covering calculation, date, common
+  knowledge, personal advice, and memory candidate behavior.
+- `chat` keeps a simple terminal conversation open; type `exit` or `quit` to
+  leave.
+- `telegram start` lets you chat with MonkeyAgent from Telegram by long polling,
+  so local testing does not need a public HTTPS callback URL.
 
 ## Personal Assistant Scenarios
 
@@ -378,8 +409,9 @@ User adoption flow:
 
 ```bash
 python3 -m monkey_agent ask "搜索 LangGraph 是什么"
-python3 -m monkey_agent review list
-python3 -m monkey_agent adopt <candidate-id>
+python3 -m monkey_agent review latest
+python3 -m monkey_agent review inspect latest
+python3 -m monkey_agent adopt latest
 ```
 
 `adopt` is a user-friendly alias for approving a pending candidate. For
@@ -486,6 +518,59 @@ Subscribe to `im.message.receive_v1`, add the bot to a chat, and ask it a
 question by private message or by mentioning it in a group. Feishu sender and
 chat metadata are passed through `context`; learning still writes to the single
 personal workspace for this deployment.
+
+## Telegram Bot
+
+Telegram is the easiest non-CLI client for local testing because polling does
+not require a public HTTPS URL.
+
+1. In Telegram, talk to `@BotFather`, create a bot, and copy the bot token.
+2. Add the token to `.env`:
+
+```env
+TELEGRAM_BOT_TOKEN=123456:xxx
+TELEGRAM_ALLOWED_CHAT_IDS=
+TELEGRAM_POLL_TIMEOUT=25
+TELEGRAM_POLL_INTERVAL=1
+TELEGRAM_REQUEST_TIMEOUT=30
+```
+
+3. Start polling in setup mode:
+
+```bash
+python3 -m monkey_agent telegram start
+```
+
+4. Send `/whoami` to the bot. MonkeyAgent replies with your `chat_id`.
+5. Add that id to `.env` and restart:
+
+```env
+TELEGRAM_ALLOWED_CHAT_IDS=123456789
+```
+
+6. Chat normally:
+
+```text
+1+1等于几
+我明天拜访客户应该准备什么？
+以后默认用表格输出，这是我的偏好
+```
+
+Useful Telegram commands:
+
+```text
+/start
+/whoami
+/trace on
+/trace off
+```
+
+Security defaults:
+
+- If `TELEGRAM_ALLOWED_CHAT_IDS` is empty, ordinary Ask messages are blocked;
+  only `/start` and `/whoami` work so you can discover the chat id.
+- If a whitelist is configured, non-whitelisted chats are ignored.
+- v1 supports text only. Files, images, and voice messages are not parsed.
 
 ## Goal Engine
 
