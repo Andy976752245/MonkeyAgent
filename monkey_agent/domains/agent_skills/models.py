@@ -95,6 +95,13 @@ class AgentSkill:
             f"- {item.get('path')} ({item.get('kind')}, {item.get('size')} bytes)"
             for item in self.files
         )
+        scripts = [item.get("path") for item in self.files if item.get("kind") == "scripts"]
+        script_note = (
+            "Scripts require explicit user confirmation before execution:\n"
+            + "\n".join(f"- {item}" for item in scripts)
+            if scripts
+            else "No executable scripts were found."
+        )
         return (
             f"Agent Skill: {self.name}\n"
             f"Description: {self.description}\n"
@@ -102,7 +109,8 @@ class AgentSkill:
             "Instructions from SKILL.md:\n"
             f"{self.body.strip()}\n\n"
             "Bundled files available for reference only; scripts are not auto-executed:\n"
-            f"{files or '- SKILL.md'}"
+            f"{files or '- SKILL.md'}\n\n"
+            f"{script_note}"
         )
 
     def match_text(self) -> str:

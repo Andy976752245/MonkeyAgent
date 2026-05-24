@@ -25,8 +25,10 @@ class AgentState(TypedDict, total=False):
     deterministic_results: list[dict[str, Any]]
     matched_skills: list[dict[str, Any]]
     execution_path: list[str]
+    timings: list[dict[str, Any]]
     exploration: dict[str, Any]
     tool_builder: dict[str, Any]
+    agent_skill_runtime: dict[str, Any]
     route: str
     answer: str
     clarification_questions: list[str]

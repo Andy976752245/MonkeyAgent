@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
 
+from monkey_agent.domains.execution import ExecutionResult
+
 
 class Permission(str, Enum):
     AUTO = "auto"
@@ -56,6 +58,26 @@ class ToolExecutionResult:
             "data": self.data,
             "source_tool": self.tool_id,
         }
+
+    def to_execution_result(self) -> ExecutionResult:
+        return ExecutionResult(
+            kind="tool",
+            success=self.success,
+            content=self.content,
+            data=self.data,
+            evidence=self.public_evidence,
+            requires_confirmation=self.permission == Permission.CONFIRM,
+            error=self.error,
+            risk=self.risk.value,
+            metadata={
+                "tool_id": self.tool_id,
+                "tool_name": self.tool_name,
+                "permission": self.permission.value,
+                "read_only": self.read_only,
+                "stable_rule_candidate": self.stable_rule_candidate,
+                "candidate_type": self.candidate_type,
+            },
+        )
 
 
 class Tool(Protocol):

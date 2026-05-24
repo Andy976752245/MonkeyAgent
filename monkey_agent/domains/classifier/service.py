@@ -138,8 +138,11 @@ def _intent_keywords(question: str) -> list[str]:
     for intent, words in mapping.items():
         if any(word in question for word in words):
             found.append(intent)
-    if _looks_like_arithmetic(question) and "calculation" not in found:
-        found.append("calculation")
+    if _looks_like_arithmetic(question):
+        if "calculation" not in found:
+            found.append("calculation")
+        if "unit_conversion" in found and not _has_explicit_unit(question):
+            found.remove("unit_conversion")
     return found or ["general"]
 
 
@@ -173,9 +176,34 @@ def _looks_like_arithmetic(question: str) -> bool:
         .replace("×", "*")
         .replace("÷", "/")
     )
+    normalized = _normalize_chinese_arithmetic(normalized)
     return bool(
         re.search(r"\d", normalized)
         and re.search(r"\d\s*[\+\-\*/]\s*\d|\([0-9\+\-\*/\.\s]+\)", normalized)
+    )
+
+
+def _normalize_chinese_arithmetic(text: str) -> str:
+    replacements = [
+        ("加上", "+"),
+        ("加", "+"),
+        ("减去", "-"),
+        ("减", "-"),
+        ("乘以", "*"),
+        ("乘", "*"),
+        ("除以", "/"),
+        ("除", "/"),
+    ]
+    normalized = text
+    for old, new in replacements:
+        normalized = normalized.replace(old, new)
+    return normalized
+
+
+def _has_explicit_unit(question: str) -> bool:
+    return any(
+        unit in question
+        for unit in ["公里", "千米", "米", "千克", "公斤", "克", "摄氏", "华氏", "升", "毫升"]
     )
 
 

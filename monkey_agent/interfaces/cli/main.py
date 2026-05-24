@@ -62,6 +62,11 @@ def main(argv: list[str] | None = None) -> None:
     skills_disable.add_argument("skill_name")
     skills_remove = skills_sub.add_parser("remove")
     skills_remove.add_argument("skill_name")
+    skills_run = skills_sub.add_parser("run")
+    skills_run.add_argument("skill_name")
+    skills_run.add_argument("--script", required=True)
+    skills_run.add_argument("--input", default="{}")
+    skills_run.add_argument("--confirm", action="store_true")
 
     memory_parser = sub.add_parser("memory")
     memory_sub = memory_parser.add_subparsers(dest="memory_command", required=True)
@@ -195,6 +200,19 @@ def main(argv: list[str] | None = None) -> None:
             print(json.dumps(agent.disable_agent_skill(args.skill_name), ensure_ascii=False, indent=2))
         elif args.skills_command == "remove":
             print(json.dumps(agent.remove_agent_skill(args.skill_name), ensure_ascii=False, indent=2))
+        elif args.skills_command == "run":
+            print(
+                json.dumps(
+                    agent.run_agent_skill(
+                        args.skill_name,
+                        args.script,
+                        input_data=_load_json(args.input),
+                        confirm=args.confirm,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
     elif args.command == "memory":
         print(json.dumps(agent.list_memory(), ensure_ascii=False, indent=2))
     elif args.command == "counterexamples":

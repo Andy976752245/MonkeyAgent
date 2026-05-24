@@ -78,6 +78,7 @@ class Settings:
     telegram_poll_timeout: int
     telegram_poll_interval: float
     telegram_request_timeout: int
+    agent_skill_script_timeout: int
 
 
 def load_settings() -> Settings:
@@ -147,6 +148,7 @@ def load_settings() -> Settings:
         telegram_poll_timeout=int(os.getenv("TELEGRAM_POLL_TIMEOUT", "25")),
         telegram_poll_interval=float(os.getenv("TELEGRAM_POLL_INTERVAL", "1")),
         telegram_request_timeout=int(os.getenv("TELEGRAM_REQUEST_TIMEOUT", "30")),
+        agent_skill_script_timeout=int(os.getenv("AGENT_SKILL_SCRIPT_TIMEOUT", "30")),
     )
 
 

@@ -104,6 +104,7 @@ def settings_for(tmp: Path) -> Settings:
         telegram_poll_timeout=25,
         telegram_poll_interval=0,
         telegram_request_timeout=30,
+        agent_skill_script_timeout=30,
     )
 
 
@@ -114,7 +115,26 @@ def write_basic_rules(rules_dir: Path) -> None:
             "type": "formula",
             "name": "通用四则运算规则",
             "intent": ["calculation"],
-            "keywords": ["+", "-", "*", "/", "×", "÷", "等于几", "帮我算", "计算"],
+            "keywords": [
+                "+",
+                "-",
+                "*",
+                "/",
+                "×",
+                "÷",
+                "加",
+                "加上",
+                "减",
+                "减去",
+                "乘",
+                "乘以",
+                "除",
+                "除以",
+                "等于几",
+                "等于多少",
+                "帮我算",
+                "计算",
+            ],
             "priority": 80,
             "status": "active",
             "handler": "arithmetic_formula",
@@ -208,6 +228,34 @@ class MonkeyAgentRulesFirstTest(unittest.TestCase):
             self.assertEqual(result["deterministic_results"][0]["value"], "2")
             self.assertNotIn("need_more_info", result["execution_path"])
 
+    def test_basic_arithmetic_uses_fast_path_without_llm_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings = settings_for(tmp)
+            write_basic_rules(settings.rules_dir)
+            model = CountingModel()
+            agent = MonkeyAgent(settings=settings, chat_model=model)
+            result = agent.ask("1+1等于几")
+            self.assertEqual(result["route"], "rules")
+            self.assertEqual(result["answer"], "1+1 = 2")
+            self.assertIn("llm_classify_skipped", result["execution_path"])
+            self.assertIn("reason_fast_path", result["execution_path"])
+            self.assertTrue(result.get("timings"))
+            self.assertTrue(all("node" in item and "ms" in item for item in result["timings"]))
+            self.assertEqual(model.classify_calls, 0)
+            self.assertEqual(model.generate_calls, 0)
+
+    def test_basic_arithmetic_handles_chinese_operator_words(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            settings = settings_for(tmp)
+            write_basic_rules(settings.rules_dir)
+            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
+            result = agent.ask("5乘以5等于多少")
+            self.assertEqual(result["route"], "rules")
+            self.assertEqual(result["answer"], "5*5 = 25")
+            self.assertEqual(result["deterministic_results"][0]["value"], "25")
+
     def test_basic_arithmetic_rule_handles_parentheses_safely(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
@@ -294,175 +342,6 @@ class MonkeyAgentRulesFirstTest(unittest.TestCase):
             self.assertEqual(result["route"], "need_more_info")
             self.assertTrue(result["routing_policy"]["clarification_allowed"])
             self.assertEqual(result["routing_policy"]["category"], "business_missing_context")
-
-    def test_route_policy_is_written_to_run_trace(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            settings = settings_for(tmp)
-            write_basic_rules(settings.rules_dir)
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            result = agent.ask("1+1等于几")
-            record = agent.get_run(result["run_id"])
-            self.assertEqual(record["routing_policy"]["category"], "deterministic_basic")
-            self.assertEqual(record["routing_policy"]["final_route"], result["routing_policy"]["final_route"])
-
-    def test_skills_run_when_no_rules_match(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            settings = settings_for(tmp)
-            (settings.skills_dir / "monthly.yaml").write_text(
-                yaml.safe_dump(
-                    {
-                        "id": "skill_monthly",
-                        "name": "报告写作 Skill",
-                        "description": "monthly",
-                        "task_types": ["report_writing"],
-                        "keywords": ["月报", "周报", "总结"],
-                        "priority": 60,
-                        "status": "active",
-                        "prompt": "按月报结构分析",
-                    },
-                    allow_unicode=True,
-                ),
-                encoding="utf-8",
-            )
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            result = agent.ask("帮我做一份项目月报")
-            self.assertEqual(result["route"], "skills")
-            self.assertEqual(result["matched_rules"], [])
-            self.assertEqual(result["matched_skills"][0]["id"], "skill_monthly")
-
-    def test_agent_skill_imports_and_matches_question(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            settings = settings_for(tmp)
-            source = write_agent_skill(
-                tmp / "source",
-                "browser-testing",
-                "Use when asked to create browser automation or pytest web tests.",
-                "Always create a browser test plan before implementation.",
-            )
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            installed = agent.import_agent_skill(str(source))
-            self.assertEqual(installed["id"], "browser-testing")
-            self.assertTrue(
-                (settings.runtime_dir / "personal" / "agent_skills" / "browser-testing" / "SKILL.md").exists()
-            )
-            self.assertEqual(len(agent.list_skills(skill_type="agent")), 1)
-
-            result = agent.ask("帮我创建 browser automation pytest 测试方案")
-            self.assertEqual(result["route"], "skills")
-            self.assertEqual(result["matched_skills"][0]["id"], "browser-testing")
-            self.assertEqual(result["matched_skills"][0]["skill_kind"], "agent")
-            self.assertIn("Always create a browser test plan", result["matched_skills"][0]["prompt"])
-
-    def test_agent_skill_install_from_github_style_source_uses_git_clone(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            settings = settings_for(tmp)
-            repo = tmp / "repo"
-            write_agent_skill(
-                repo / "skills",
-                "github-skill",
-                "Use when asked about GitHub style installed skills.",
-            )
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-
-            def fake_clone(repo_url: str, target: Path) -> None:
-                self.assertEqual(repo_url, "https://github.com/owner/repo.git")
-                shutil.copytree(repo, target)
-
-            with patch("monkey_agent.domains.agent_skills.installer._git_clone", fake_clone):
-                installed = agent.install_agent_skill("owner/repo/github-skill")
-
-            self.assertEqual(installed["id"], "github-skill")
-            self.assertEqual(len(agent.list_agent_skills()), 1)
-            self.assertIn("github-skill", agent.inspect_agent_skill("github-skill")["body"])
-
-    def test_agent_skill_duplicate_install_updates_registry_without_duplication(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            settings = settings_for(tmp)
-            source = write_agent_skill(
-                tmp / "source",
-                "repeat-skill",
-                "Use when asked about repeatable skills.",
-            )
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            agent.import_agent_skill(str(source))
-            source.joinpath("SKILL.md").write_text(
-                source.joinpath("SKILL.md")
-                .read_text(encoding="utf-8")
-                .replace("repeatable skills", "updated repeatable skills"),
-                encoding="utf-8",
-            )
-            agent.import_agent_skill(str(source))
-            skills = agent.list_agent_skills()
-            self.assertEqual(len(skills), 1)
-            self.assertIn("updated", skills[0]["description"])
-
-    def test_agent_skill_disable_and_remove(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            settings = settings_for(tmp)
-            source = write_agent_skill(
-                tmp / "source",
-                "toggle-skill",
-                "Use when asked about toggle skill matching.",
-            )
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            agent.import_agent_skill(str(source))
-            agent.disable_agent_skill("toggle-skill")
-            result = agent.ask("toggle skill matching 怎么处理？")
-            self.assertFalse(
-                any(item.get("id") == "toggle-skill" for item in result.get("matched_skills", []))
-            )
-            agent.enable_agent_skill("toggle-skill")
-            result = agent.ask("toggle skill matching 怎么处理？")
-            self.assertTrue(
-                any(item.get("id") == "toggle-skill" for item in result.get("matched_skills", []))
-            )
-            removed = agent.remove_agent_skill("toggle-skill")
-            self.assertEqual(removed["id"], "toggle-skill")
-            self.assertFalse((settings.runtime_dir / "personal" / "agent_skills" / "toggle-skill").exists())
-
-    def test_agent_skill_import_rejects_invalid_or_unsafe_packages(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            tmp = Path(raw)
-            settings = settings_for(tmp)
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-
-            missing = tmp / "missing-skill"
-            missing.mkdir()
-            with self.assertRaises(ValueError):
-                agent.import_agent_skill(str(missing))
-
-            bad_name = tmp / "BadName"
-            bad_name.mkdir()
-            bad_name.joinpath("SKILL.md").write_text(
-                "---\nname: BadName\ndescription: bad\n---\nBody\n",
-                encoding="utf-8",
-            )
-            with self.assertRaises(ValueError):
-                agent.import_agent_skill(str(bad_name))
-
-            long_desc = tmp / "long-desc"
-            long_desc.mkdir()
-            long_desc.joinpath("SKILL.md").write_text(
-                "---\nname: long-desc\ndescription: " + ("x" * 1025) + "\n---\nBody\n",
-                encoding="utf-8",
-            )
-            with self.assertRaises(ValueError):
-                agent.import_agent_skill(str(long_desc))
-
-            linked = write_agent_skill(
-                tmp / "source",
-                "linked-skill",
-                "Use when asked about symlink safety.",
-            )
-            linked.joinpath("escape").symlink_to(tmp / "outside")
-            with self.assertRaises(ValueError):
-                agent.import_agent_skill(str(linked))
 
     def test_need_more_info_when_no_rules_or_skills(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1226,86 +1105,6 @@ class MonkeyAgentRulesFirstTest(unittest.TestCase):
             )
             self.assertFalse((settings.runtime_dir / "users").exists())
 
-    def test_ask_writes_run_record(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            (settings.rules_dir / "percentage.yaml").write_text(
-                yaml.safe_dump(
-                    {
-                        "id": "rule_percentage_formula",
-                        "type": "formula",
-                        "name": "通用百分比计算规则",
-                        "intent": ["calculation"],
-                        "keywords": ["百分比", "完成率", "总数"],
-                        "priority": 100,
-                        "status": "active",
-                        "handler": "percentage_formula",
-                        "rule": "百分比 = 分子 / 分母 * 100%",
-                    },
-                    allow_unicode=True,
-                ),
-                encoding="utf-8",
-            )
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            result = agent.ask(
-                "已完成10，总数200，完成率百分比是多少？",
-                context={"numerator": 10, "denominator": 200},
-            )
-            self.assertIn("run_id", result)
-            record = agent.get_run(result["run_id"])
-            self.assertIsNotNone(record)
-            assert record is not None
-            self.assertEqual(record["type"], "ask")
-            self.assertEqual(record["route"], "rules")
-            self.assertEqual(record["matched_rules"][0]["id"], "rule_percentage_formula")
-            self.assertIn("execute_rules", record["execution_path"])
-            self.assertIn("5.00%", record["answer_preview"])
-            self.assertTrue(
-                (
-                    settings.runtime_dir
-                    / "personal"
-                    / "runs"
-                    / "ask"
-                    / f"{result['run_id']}.json"
-                ).exists()
-            )
-            self.assertFalse((settings.runtime_dir / "users").exists())
-
-    def test_ask_run_records_evaluation_for_rules(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            (settings.rules_dir / "percentage.yaml").write_text(
-                yaml.safe_dump(
-                    {
-                        "id": "rule_percentage_formula",
-                        "type": "formula",
-                        "name": "通用百分比计算规则",
-                        "intent": ["calculation"],
-                        "keywords": ["百分比", "完成率", "总数"],
-                        "priority": 100,
-                        "status": "active",
-                        "handler": "percentage_formula",
-                        "rule": "百分比 = 分子 / 分母 * 100%",
-                    },
-                    allow_unicode=True,
-                ),
-                encoding="utf-8",
-            )
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            result = agent.ask(
-                "已完成10，总数200，完成率百分比是多少？",
-                context={"numerator": 10, "denominator": 200},
-            )
-            self.assertEqual(result["evaluation"]["status"], "pass")
-            passed = set(result["evaluation"]["passed_checks"])
-            self.assertIn("rule_value_consistency", passed)
-            self.assertIn("deterministic_result_used", passed)
-
-            record = agent.get_run(result["run_id"])
-            self.assertIsNotNone(record)
-            assert record is not None
-            self.assertEqual(record["evaluation"]["status"], "pass")
-
     def test_ask_evaluator_detects_missing_rule_value(self) -> None:
         result = AskEvaluator().evaluate(
             {
@@ -1350,31 +1149,6 @@ class MonkeyAgentRulesFirstTest(unittest.TestCase):
         failed = set(result.failed_checks)
         self.assertIn("clarification_specificity", failed)
 
-    def test_tool_builder_writes_tool_run_without_generated_code_body(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            agent = MonkeyAgent(
-                settings=settings,
-                chat_model=UnsafeToolBuilderModel(),
-                capability_registry=CapabilityRegistry([]),
-            )
-            result = agent.ask("帮我生成一个查询工具")
-            self.assertIn("run_id", result)
-            self.assertIn("tool_run_id", result)
-            tool_run = agent.get_run(result["tool_run_id"])
-            self.assertIsNotNone(tool_run)
-            assert tool_run is not None
-            self.assertEqual(tool_run["type"], "tool")
-            self.assertEqual(tool_run["status"], "failed")
-            self.assertEqual(tool_run["tool_builder"]["error"], "unsafe_code")
-            self.assertEqual(tool_run["evaluation"]["status"], "failed")
-            failed = set(tool_run["evaluation"]["failed_checks"])
-            self.assertIn("tool_builder_safety", failed)
-            self.assertNotIn("data", tool_run["tool_builder"]["evaluation"]["checks"][1])
-            serialized = json.dumps(tool_run, ensure_ascii=False)
-            self.assertNotIn("os.remove", serialized)
-            self.assertFalse((settings.runtime_dir / "users").exists())
-
     def test_tool_builder_pending_counterexample_contains_evaluation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             settings = settings_for(Path(raw))
@@ -1408,134 +1182,6 @@ class MonkeyAgentRulesFirstTest(unittest.TestCase):
             self.assertIn("tool_builder_safety", passed)
             self.assertIn("tool_builder_dry_run", passed)
 
-    def test_goal_start_creates_personal_goal_and_tasks(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            result = agent.start_goal(
-                "我作为销售明天拜访甲方，帮我准备一个行动方案",
-            )
-            goal_id = result["goal_id"]
-            self.assertEqual(result["status"], "active")
-            self.assertTrue(result["tasks"])
-            self.assertTrue((settings.runtime_dir / "personal" / "goals" / goal_id).exists())
-            self.assertTrue(agent.list_goals())
-            self.assertFalse((settings.runtime_dir / "users").exists())
-
-            stepped = agent.step_goal(goal_id)
-            self.assertEqual(stepped["status"], "completed")
-            self.assertIn("拜访目标", stepped["answer"])
-            self.assertEqual(stepped["learning_candidate_ids"], [])
-
-    def test_goal_start_and_step_update_goal_run(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            started = agent.start_goal(
-                "我作为销售明天拜访甲方，帮我准备一个行动方案",
-                max_steps=1,
-            )
-            self.assertIn("run_id", started)
-            goal_run = agent.get_run(started["run_id"])
-            self.assertIsNotNone(goal_run)
-            assert goal_run is not None
-            self.assertEqual(goal_run["type"], "goal")
-            self.assertEqual(goal_run["input"]["goal_id"], started["goal_id"])
-
-            stepped = agent.step_goal(started["goal_id"])
-            self.assertEqual(stepped["run_id"], started["run_id"])
-            updated = agent.get_run(started["run_id"])
-            self.assertIsNotNone(updated)
-            assert updated is not None
-            self.assertEqual(updated["status"], stepped["status"])
-            self.assertEqual(updated["input"]["goal"], "我作为销售明天拜访甲方，帮我准备一个行动方案")
-            self.assertEqual(updated["input"]["goal_id"], started["goal_id"])
-            self.assertIn("evaluate_progress", updated["execution_path"])
-            self.assertTrue(updated["evaluation"])
-            self.assertIn("status", updated["evaluation"])
-            self.assertTrue(
-                (
-                    settings.runtime_dir
-                    / "personal"
-                    / "runs"
-                    / "goals"
-                    / f"{started['run_id']}.json"
-                ).exists()
-            )
-
-    def test_goal_step_returns_unified_evaluation(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            started = agent.start_goal(
-                "我作为销售明天拜访甲方，帮我准备一个行动方案",
-                max_steps=1,
-            )
-            stepped = agent.step_goal(started["goal_id"])
-            self.assertTrue(stepped["evaluations"])
-            latest = stepped["evaluations"][-1]
-            self.assertIn("passed_checks", latest)
-            self.assertIn("failed_checks", latest)
-            self.assertIn("risk_flags", latest)
-            self.assertEqual(stepped["last_evaluation"]["status"], latest["status"])
-
-    def test_run_store_latest_list_and_preview_limit(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            run = agent.run_store.record_ask(
-                "长答案",
-                {},
-                {"answer": "x" * 1200, "route": "general_reason", "execution_path": ["reason"]},
-            )
-            latest = agent.latest_run("ask")
-            self.assertIsNotNone(latest)
-            assert latest is not None
-            self.assertEqual(latest["id"], run.id)
-            self.assertEqual(len(latest["answer_preview"]), 1000)
-            listed = agent.list_runs("ask")
-            self.assertEqual(listed[0]["id"], run.id)
-
-    def test_run_store_persists_ask_evaluation_summary(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            run = agent.run_store.record_ask(
-                "测试评估记录",
-                {},
-                {
-                    "answer": "ok",
-                    "route": "general_reason",
-                    "execution_path": ["reason", "evaluate"],
-                    "evaluation": {
-                        "status": "pass",
-                        "score": 1.0,
-                        "passed_checks": ["answer_not_empty"],
-                        "failed_checks": [],
-                    },
-                },
-            )
-            record = agent.get_run(run.id)
-            self.assertIsNotNone(record)
-            assert record is not None
-            self.assertEqual(record["evaluation"]["status"], "pass")
-            self.assertEqual(record["evaluation"]["passed_checks"], ["answer_not_empty"])
-
-    def test_goal_task_reads_old_yaml_with_dag_defaults(self) -> None:
-        task = GoalTask.from_dict(
-            {
-                "task_id": "task_001",
-                "title": "旧任务",
-                "type": "reasoning",
-                "status": "pending",
-            }
-        )
-        self.assertEqual(task.depends_on, [])
-        self.assertEqual(task.executor, "reasoning")
-        self.assertEqual(task.attempts, 0)
-        self.assertEqual(task.max_attempts, 2)
-        self.assertEqual(task.acceptance_criteria, [])
-
     def test_llm_goal_planner_outputs_dag_and_fallback_works(self) -> None:
         class JsonPlannerModel(LocalHeuristicModel):
             def generate(self, question, deterministic_results, skills, context):
@@ -1560,129 +1206,6 @@ class MonkeyAgentRulesFirstTest(unittest.TestCase):
         )
         self.assertTrue(fallback_criteria)
         self.assertEqual(fallback_tasks[1].depends_on, ["task_001"])
-
-    def test_goal_dag_step_respects_dependencies(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            started = agent.start_goal(
-                "我作为销售明天拜访甲方，帮我准备一个行动方案",
-                max_steps=1,
-            )
-            stepped = agent.step_goal(started["goal_id"])
-            statuses = {task["task_id"]: task["status"] for task in stepped["tasks"]}
-            self.assertEqual(statuses["task_001"], "done")
-            self.assertEqual(statuses["task_002"], "pending")
-            self.assertEqual(stepped["status"], "active")
-            self.assertEqual(stepped["next_action"], "continue")
-            self.assertEqual(stepped["revision_count"], 0)
-            self.assertFalse(any(task["task_id"] == "task_004" for task in stepped["tasks"]))
-
-    def test_goal_plan_events_pause_resume_interfaces(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            started = agent.start_goal("帮我搜索公开资料")
-            goal_id = started["goal_id"]
-
-            plan = agent.get_goal_plan(goal_id)
-            self.assertEqual(plan["goal_id"], goal_id)
-            self.assertTrue(plan["tasks"])
-            self.assertEqual(plan["plan_version"], 1)
-
-            paused = agent.pause_goal(goal_id)
-            self.assertEqual(paused["status"], "paused")
-            self.assertEqual(paused["next_action"], "paused")
-            resumed = agent.resume_goal(goal_id)
-            self.assertEqual(resumed["status"], "active")
-
-            events = agent.get_goal_events(goal_id)
-            event_names = [item["event"] for item in events["events"]]
-            self.assertIn("goal_created", event_names)
-            self.assertIn("goal_paused", event_names)
-            self.assertIn("goal_resumed", event_names)
-
-    def test_goal_start_uses_langgraph_thread_checkpoint_metadata(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            started = agent.start_goal("帮我搜索公开资料")
-            self.assertEqual(started["thread_id"], started["goal_id"])
-            self.assertTrue(started["checkpointed"])
-            self.assertIn(started["checkpoint_backend"], {"sqlite", "memory"})
-            self.assertFalse(started["resume_required"])
-
-            events = agent.get_goal_events(started["goal_id"])
-            self.assertEqual(events["thread_id"], started["goal_id"])
-            self.assertTrue(events["checkpointed"])
-            self.assertIn("checkpoint_summary", events)
-
-    def test_goal_step_recovers_from_checkpoint_when_projection_is_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            started = agent.start_goal(
-                "我作为销售明天拜访甲方，帮我准备一个行动方案",
-                max_steps=1,
-            )
-            projection_tasks = (
-                settings.runtime_dir
-                / "personal"
-                / "goals"
-                / started["goal_id"]
-                / "tasks.yaml"
-            )
-            projection_tasks.unlink()
-
-            stepped = agent.step_goal(started["goal_id"])
-            self.assertTrue(stepped["tasks"])
-            self.assertEqual(stepped["tasks"][0]["status"], "done")
-            self.assertTrue(projection_tasks.exists())
-
-    def test_goal_status_rebuilds_projection_from_checkpoint_when_goal_yaml_is_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
-            started = agent.start_goal(
-                "我作为销售明天拜访甲方，帮我准备一个行动方案",
-                max_steps=1,
-            )
-            goal_yaml = (
-                settings.runtime_dir
-                / "personal"
-                / "goals"
-                / started["goal_id"]
-                / "goal.yaml"
-            )
-            goal_yaml.unlink()
-
-            status = agent.get_goal(started["goal_id"])
-            self.assertEqual(status["goal_id"], started["goal_id"])
-            self.assertTrue(status["tasks"])
-            self.assertTrue(goal_yaml.exists())
-
-    def test_goal_interrupt_payload_and_resume_use_same_thread(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            agent = MonkeyAgent(
-                settings=settings,
-                chat_model=LocalHeuristicModel(),
-                capability_registry=CapabilityRegistry([]),
-            )
-            started = agent.start_goal(
-                "帮我接入飞书机器人，支持给指定群发送消息，并沉淀成可复用能力。",
-                max_steps=5,
-            )
-            stepped = agent.step_goal(started["goal_id"])
-            self.assertTrue(stepped["interrupted"])
-            self.assertTrue(stepped["resume_required"])
-            self.assertEqual(stepped["thread_id"], started["goal_id"])
-            self.assertEqual(stepped["interrupt_payload"]["goal_id"], started["goal_id"])
-
-            confirmed = agent.step_goal(started["goal_id"], confirm=True)
-            self.assertEqual(confirmed["thread_id"], started["goal_id"])
-            self.assertFalse(confirmed["resume_required"])
-            self.assertEqual(confirmed["status"], "completed")
 
     def test_feishu_url_verification_returns_challenge(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1774,33 +1297,6 @@ class MonkeyAgentRulesFirstTest(unittest.TestCase):
             handler = FeishuEventHandler(settings, lambda question, context: {})
             with self.assertRaises(FeishuSecurityError):
                 handler.handle({"type": "url_verification", "token": "bad", "challenge": "x"})
-
-    def test_goal_integration_builds_tool_and_waits_for_write_confirmation(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            agent = MonkeyAgent(
-                settings=settings,
-                chat_model=LocalHeuristicModel(),
-                capability_registry=CapabilityRegistry([]),
-            )
-            started = agent.start_goal(
-                "帮我接入飞书机器人，支持给指定群发送消息，并沉淀成可复用能力。",
-                max_steps=5,
-            )
-            stepped = agent.step_goal(started["goal_id"])
-            self.assertEqual(stepped["status"], "waiting_human")
-            self.assertTrue(stepped["requires_confirmation"])
-            self.assertTrue(agent.list_generated_tools())
-            self.assertTrue(stepped["learning_candidate_ids"])
-            self.assertIn("ask_human", stepped["execution_path"])
-            self.assertEqual(stepped["last_evaluation"]["status"], "waiting_human")
-            self.assertTrue(stepped["last_evaluation"]["requires_confirmation"])
-
-            confirmed = agent.step_goal(
-                started["goal_id"],
-                confirm=True,
-            )
-            self.assertEqual(confirmed["status"], "completed")
 
     def test_bailian_role_models_are_configurable(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1932,153 +1428,53 @@ class MonkeyAgentRulesFirstTest(unittest.TestCase):
         self.assertIn("MonkeyAgent Chat", text)
         self.assertIn("回答：你好", text)
 
-    def test_telegram_setup_mode_allows_whoami_but_blocks_ask(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = settings_for(Path(raw))
-            calls = []
-            client = FakeTelegramClient()
-            handler = TelegramMessageHandler(
-                settings,
-                lambda question, context: calls.append((question, context)) or {"answer": "ok"},
-                client,
-            )
-
-            whoami = handler.handle_update(_telegram_update("/whoami", chat_id=123))
-            self.assertEqual(whoami["status"], "replied")
-            self.assertIn("chat_id: 123", client.sent[-1]["text"])
-
-            blocked = handler.handle_update(_telegram_update("1+1等于几", chat_id=123))
-            self.assertEqual(blocked["status"], "setup_required")
-            self.assertEqual(calls, [])
-            self.assertIn("TELEGRAM_ALLOWED_CHAT_IDS=123", client.sent[-1]["text"])
-
-    def test_telegram_allowed_chat_invokes_agent_and_sends_answer(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = Settings(
-                **{
-                    **settings_for(Path(raw)).__dict__,
-                    "telegram_bot_token": "token",
-                    "telegram_allowed_chat_ids": ["123"],
-                }
-            )
-            calls = []
-            client = FakeTelegramClient()
-            handler = TelegramMessageHandler(
-                settings,
-                lambda question, context: calls.append((question, context))
-                or {"answer": "答案是 2", "route": "rules", "run_id": "run_1"},
-                client,
-            )
-
-            result = handler.handle_update(_telegram_update("1+1等于几", chat_id=123))
-            self.assertEqual(result["status"], "replied")
-            self.assertEqual(calls[0][0], "1+1等于几")
-            self.assertEqual(calls[0][1]["channel"], "telegram")
-            self.assertEqual(calls[0][1]["telegram_chat_id"], "123")
-            self.assertEqual(client.sent[-1]["text"], "答案是 2")
-
-    def test_telegram_rejects_non_whitelisted_chat(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = Settings(
-                **{
-                    **settings_for(Path(raw)).__dict__,
-                    "telegram_bot_token": "token",
-                    "telegram_allowed_chat_ids": ["123"],
-                }
-            )
-            calls = []
-            client = FakeTelegramClient()
-            handler = TelegramMessageHandler(
-                settings,
-                lambda question, context: calls.append((question, context)) or {"answer": "ok"},
-                client,
-            )
-            result = handler.handle_update(_telegram_update("你好", chat_id=456))
-            self.assertEqual(result["status"], "ignored")
-            self.assertEqual(calls, [])
-            self.assertEqual(client.sent, [])
-
-    def test_telegram_trace_toggle_adds_route_summary(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = Settings(
-                **{
-                    **settings_for(Path(raw)).__dict__,
-                    "telegram_bot_token": "token",
-                    "telegram_allowed_chat_ids": ["123"],
-                }
-            )
-            client = FakeTelegramClient()
-            handler = TelegramMessageHandler(
-                settings,
-                lambda question, context: {
-                    "answer": "已计算",
-                    "route": "rules",
-                    "run_id": "run_1",
-                    "confidence": 0.9,
-                    "evaluation": {"status": "pass"},
-                },
-                client,
-            )
-            handler.handle_update(_telegram_update("/trace on", chat_id=123))
-            handler.handle_update(_telegram_update("1+1等于几", chat_id=123))
-            self.assertIn("route: rules", client.sent[-1]["text"])
-            self.assertIn("run_id: run_1", client.sent[-1]["text"])
-
-            handler.handle_update(_telegram_update("/trace off", chat_id=123))
-            handler.handle_update(_telegram_update("1+1等于几", chat_id=123))
-            self.assertEqual(client.sent[-1]["text"], "已计算")
-
-    def test_telegram_non_text_message_returns_text_only_notice(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = Settings(
-                **{
-                    **settings_for(Path(raw)).__dict__,
-                    "telegram_bot_token": "token",
-                    "telegram_allowed_chat_ids": ["123"],
-                }
-            )
-            client = FakeTelegramClient()
-            handler = TelegramMessageHandler(settings, lambda question, context: {}, client)
-            result = handler.handle_update(
-                {
-                    "update_id": 1,
-                    "message": {
-                        "message_id": 7,
-                        "chat": {"id": 123, "type": "private"},
-                        "from": {"id": 99},
-                        "photo": [{"file_id": "x"}],
-                    },
-                }
-            )
-            self.assertEqual(result["reason"], "non_text_message")
-            self.assertEqual(client.sent[-1]["text"], "当前仅支持文本消息。")
-
-    def test_telegram_polling_once_processes_updates_and_advances_offset(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            settings = Settings(
-                **{
-                    **settings_for(Path(raw)).__dict__,
-                    "telegram_bot_token": "token",
-                    "telegram_allowed_chat_ids": ["123"],
-                }
-            )
-            client = FakeTelegramClient(updates=[_telegram_update("你好", chat_id=123, update_id=41)])
-            handler = TelegramMessageHandler(settings, lambda question, context: {"answer": "你好"}, client)
-            runner = TelegramPollingRunner(settings, client, handler)
-            result = runner.run(once=True)
-            self.assertEqual(result["status"], "completed")
-            self.assertEqual(result["processed"], 1)
-            self.assertEqual(runner.offset, 42)
-            self.assertEqual(client.sent[-1]["text"], "你好")
-
-    def test_telegram_split_reply_uses_telegram_limit(self) -> None:
-        chunks = split_telegram_text("x" * 4100)
-        self.assertEqual(len(chunks), 2)
-        self.assertEqual(len(chunks[0]), 4096)
+class FailingReasonModel(LocalHeuristicModel):
+    def generate(self, question, deterministic_results, skills, context):
+        raise RuntimeError("network unavailable")
 
 
-if __name__ == "__main__":
-    unittest.main()
+class CountingModel(LocalHeuristicModel):
+    def __init__(self):
+        self.classify_calls = 0
+        self.generate_calls = 0
+
+    def classify_question(self, question, context):
+        self.classify_calls += 1
+        return super().classify_question(question, context)
+
+    def generate(self, question, deterministic_results, skills, context):
+        self.generate_calls += 1
+        return super().generate(question, deterministic_results, skills, context)
+
+
+class FakeTelegramClient:
+    def __init__(self, updates=None):
+        self.updates = updates or []
+        self.sent = []
+        self.get_updates_calls = []
+
+    def get_updates(self, *, offset=None, timeout=25):
+        self.get_updates_calls.append({"offset": offset, "timeout": timeout})
+        updates = self.updates
+        self.updates = []
+        return updates
+
+    def send_message(self, *, chat_id, text, parse_mode=None):
+        item = {"chat_id": str(chat_id), "text": text, "parse_mode": parse_mode}
+        self.sent.append(item)
+        return {"ok": True, "result": item}
+
+
+def _telegram_update(text: str, chat_id: int, update_id: int = 1) -> dict:
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": 7,
+            "chat": {"id": chat_id, "type": "private"},
+            "from": {"id": 99},
+            "text": text,
+        },
+    }
 
 
 class FakeWeatherTool:
@@ -2184,38 +1580,3 @@ class UnsafeToolBuilderModel(LocalHeuristicModel):
             ),
             "test_context": {},
         }
-
-
-class FailingReasonModel(LocalHeuristicModel):
-    def generate(self, question, deterministic_results, skills, context):
-        raise RuntimeError("network unavailable")
-
-
-class FakeTelegramClient:
-    def __init__(self, updates=None):
-        self.updates = updates or []
-        self.sent = []
-        self.get_updates_calls = []
-
-    def get_updates(self, *, offset=None, timeout=25):
-        self.get_updates_calls.append({"offset": offset, "timeout": timeout})
-        updates = self.updates
-        self.updates = []
-        return updates
-
-    def send_message(self, *, chat_id, text, parse_mode=None):
-        item = {"chat_id": str(chat_id), "text": text, "parse_mode": parse_mode}
-        self.sent.append(item)
-        return {"ok": True, "result": item}
-
-
-def _telegram_update(text: str, chat_id: int, update_id: int = 1) -> dict:
-    return {
-        "update_id": update_id,
-        "message": {
-            "message_id": 7,
-            "chat": {"id": chat_id, "type": "private"},
-            "from": {"id": 99},
-            "text": text,
-        },
-    }

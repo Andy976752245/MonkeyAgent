@@ -8,6 +8,13 @@ from monkey_agent.advice import (
     personal_advice_answer,
     personal_advice_clarification_questions,
 )
+from monkey_agent.workflows.ask.answers import (
+    agent_skill_execution_content,
+    fallback_answer,
+    fast_rule_answer,
+    general_knowledge_fallback,
+    is_generic_missing_capability_answer,
+)
 from monkey_agent.domains.tools.capability import CapabilityRegistry
 from monkey_agent.domains.classifier import ClassificationResult, QuestionClassifier
 from monkey_agent.domains.evaluation import AskEvaluator, ToolBuilderEvaluator
@@ -16,6 +23,8 @@ from monkey_agent.domains.learning.review_store import ReviewStore
 from monkey_agent.domains.models.bailian import ChatModel
 from monkey_agent.domains.agent_skills.matcher import AgentSkillMatcher
 from monkey_agent.domains.agent_skills.repository import AgentSkillRepository
+from monkey_agent.domains.agent_skills.runtime import AgentSkillRuntime
+from monkey_agent.domains.agent_skills.selector import AgentSkillScriptSelector
 from monkey_agent.domains.memory import PersonalMemoryStore
 from monkey_agent.domains.rules.handlers import RuleExecutor
 from monkey_agent.domains.rules.matcher import RuleMatcher
@@ -42,6 +51,8 @@ class GraphNodes:
         personal_memory: PersonalMemoryStore,
         tool_builder: ToolBuilderService,
         tool_registry: ToolRegistry,
+        agent_skill_runtime: AgentSkillRuntime | None = None,
+        agent_skill_script_selector: AgentSkillScriptSelector | None = None,
     ) -> None:
         self.rule_repository = rule_repository
         self.skill_repository = skill_repository
@@ -54,6 +65,8 @@ class GraphNodes:
         self.personal_memory = personal_memory
         self.tool_builder = tool_builder
         self.tool_registry = tool_registry
+        self.agent_skill_runtime = agent_skill_runtime
+        self.agent_skill_script_selector = agent_skill_script_selector
         self.rule_matcher = RuleMatcher()
         self.skill_matcher = SkillMatcher()
         self.agent_skill_matcher = AgentSkillMatcher()
@@ -94,6 +107,22 @@ class GraphNodes:
     def llm_classify(self, state: AgentState) -> dict[str, Any]:
         if state.get("classification_adopted"):
             return {"execution_path": state.get("execution_path", []) + ["llm_classify"]}
+        if _can_skip_llm_classify(state):
+            return {
+                "llm_classification": {
+                    "deterministic": [],
+                    "semi_deterministic": [],
+                    "uncertain": [],
+                    "intents": [],
+                    "required_tools": [],
+                    "task_type": "general",
+                    "confidence": 0.0,
+                    "clarification_questions": [],
+                    "source": "llm_skipped",
+                },
+                "llm_classification_skipped": True,
+                "execution_path": state.get("execution_path", []) + ["llm_classify_skipped"],
+            }
         llm = self.classifier.llm_classify(
             state["question"],
             state.get("context", {}),
@@ -246,11 +275,82 @@ class GraphNodes:
             key=lambda item: int(item.get("match_score", 0)),
             reverse=True,
         )
+        runtime_update = self._maybe_prepare_agent_skill_runtime(state, matched_skills)
         return {
             "matched_skills": matched_skills,
             "route": "skills" if matched_skills else "need_more_info",
+            **runtime_update,
             "execution_path": state.get("execution_path", []) + ["match_skills"],
         }
+
+    def _maybe_prepare_agent_skill_runtime(
+        self,
+        state: AgentState,
+        matched_skills: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if self.agent_skill_runtime is None or self.agent_skill_script_selector is None:
+            return {}
+        for match in matched_skills:
+            if match.get("skill_kind") != "agent":
+                continue
+            scripts = [item for item in match.get("files", []) if item.get("kind") == "scripts"]
+            if not scripts:
+                continue
+            skill = self.agent_skill_repository.get(str(match.get("id")))
+            if skill is None:
+                continue
+            plan = self.agent_skill_script_selector.select(
+                state["question"],
+                skill,
+                state.get("context", {}),
+            )
+            if plan is None:
+                continue
+            confirm = bool(state.get("context", {}).get("confirm_skill_execution"))
+            execution = self.agent_skill_runtime.execute(skill, plan, confirm=confirm)
+            runtime = {
+                "skill_id": skill.id,
+                "plan": plan.to_dict(),
+                "execution": execution.to_dict(),
+            }
+            if execution.requires_confirmation:
+                return {
+                    "agent_skill_runtime": runtime,
+                    "requires_confirmation": True,
+                    "answer": (
+                        f"Agent Skill {skill.name} 选择了脚本 {plan.script_path}，"
+                        "执行前需要确认。确认后可使用 --context "
+                        "'{\"confirm_skill_execution\":true}' 重新提问，或使用 "
+                        f"monkey skills run {skill.id} --script {plan.script_path} --confirm。"
+                    ),
+                    "confidence": 0.45,
+                    "routing_policy": {
+                        **state.get("routing_policy", {}),
+                        "final_route": "skills",
+                        "agent_skill_runtime": "waiting_confirmation",
+                    },
+                }
+            return {
+                "agent_skill_runtime": runtime,
+                "deterministic_results": [
+                    {
+                        "rule_id": f"agent_skill:{skill.id}",
+                        "rule_name": skill.name,
+                        "type": "agent_skill_script",
+                        "content": agent_skill_execution_content(execution.to_dict()),
+                        "value": execution.stdout.strip(),
+                        "requires_more_info": not execution.success,
+                        "error": execution.error,
+                        "artifacts": execution.artifacts,
+                    }
+                ],
+                "routing_policy": {
+                    **state.get("routing_policy", {}),
+                    "final_route": "skills",
+                    "agent_skill_runtime": "executed",
+                },
+            }
+        return {}
 
     def need_more_info(self, state: AgentState) -> dict[str, Any]:
         routing_policy = self.routing_policy.summarize(state)
@@ -756,6 +856,18 @@ class GraphNodes:
             return {"draft_error": str(exc)}
 
     def reason(self, state: AgentState) -> dict[str, Any]:
+        runtime_execution = (state.get("agent_skill_runtime") or {}).get("execution") or {}
+        if runtime_execution.get("requires_confirmation"):
+            return {
+                "answer": state.get("answer", ""),
+                "confidence": state.get("confidence", 0.45),
+                "requires_confirmation": True,
+                "routing_policy": {
+                    **state.get("routing_policy", {}),
+                    "final_route": state.get("route") or "skills",
+                },
+                "execution_path": state.get("execution_path", []) + ["reason_waiting_confirmation"],
+            }
         memory_context = self.personal_memory.retrieve(
             state["question"],
             state.get("context", {}),
@@ -766,6 +878,21 @@ class GraphNodes:
         context["intent_keywords"] = state.get("intent_keywords", [])
         errors = list(state.get("errors", []))
         confidence = 0.75
+        fast_answer = fast_rule_answer(state)
+        if fast_answer is not None:
+            return {
+                "answer": fast_answer,
+                "confidence": 0.95,
+                "memory_used": memory_context.preferences,
+                "counterexamples_checked": memory_context.counterexamples,
+                "errors": errors,
+                "routing_policy": {
+                    **state.get("routing_policy", {}),
+                    "final_route": state.get("route") or "rules",
+                    "reason_fast_path": True,
+                },
+                "execution_path": state.get("execution_path", []) + ["reason_fast_path"],
+            }
         try:
             answer = self.chat_model.generate(
                 question=state["question"],
@@ -776,7 +903,7 @@ class GraphNodes:
         except Exception as exc:  # noqa: BLE001 - model boundary must not break graph
             errors.append(f"model_generate_failed:{exc}")
             confidence = 0.55
-            answer = _fallback_answer(state, context)
+            answer = fallback_answer(state, context)
         return {
             "answer": answer,
             "confidence": confidence,
@@ -822,9 +949,9 @@ class GraphNodes:
                 )
             except Exception as exc:  # noqa: BLE001 - model boundary must not block fallback
                 errors.append(f"model_generate_failed:{exc}")
-                answer = _general_knowledge_fallback(state["question"])
-            if _is_generic_missing_capability_answer(answer):
-                answer = _general_knowledge_fallback(state["question"])
+                answer = general_knowledge_fallback(state["question"])
+            if is_generic_missing_capability_answer(answer):
+                answer = general_knowledge_fallback(state["question"])
             clarification_questions = []
         return {
             "route": "general_reason",
@@ -1078,6 +1205,22 @@ def _should_general_reason(state: AgentState) -> bool:
     return RoutingPolicy().prefer_general_reason(state)
 
 
+def _can_skip_llm_classify(state: AgentState) -> bool:
+    keyword = ClassificationResult.from_dict(
+        state.get("keyword_classification", {}),
+        source="keyword",
+    )
+    if keyword.confidence < 0.8:
+        return False
+    if keyword.required_tools:
+        return False
+    return keyword.task_type in {
+        "calculation",
+        "date_calculation",
+        "unit_conversion",
+    }
+
+
 def _clarification_questions_for_task(task_type: str) -> list[str]:
     if is_personal_advice_task(task_type):
         return personal_advice_clarification_questions(task_type)
@@ -1104,61 +1247,6 @@ def _clarification_questions_for_task(task_type: str) -> list[str]:
         "如果涉及计算，请提供字段定义、计算口径和必要数值。",
         "如果涉及外部查询或系统对接，请确认公开文档、鉴权配置、输入参数、输出字段和失败兜底。",
     ]
-
-
-def _fallback_answer(state: AgentState, context: dict[str, Any]) -> str:
-    if is_personal_advice_task(
-        state.get("task_type", "general"),
-        state.get("intent_keywords", []),
-    ):
-        return personal_advice_answer(
-            state["question"],
-            state.get("task_type", "general"),
-            context,
-        )
-    results = state.get("deterministic_results", [])
-    if results:
-        lines = ["已优先执行沉淀 Rules："]
-        for item in results:
-            label = item.get("rule_name") or item.get("rule_id") or "rule"
-            content = item.get("value") or item.get("content") or item.get("recommendation")
-            lines.append(f"- {label}: {content}")
-        return "\n".join(lines)
-    skills = state.get("matched_skills", [])
-    if skills:
-        names = ", ".join(str(item.get("name")) for item in skills)
-        return f"模型暂时不可用，已匹配 Skills：{names}。请补充更多上下文后可继续生成更完整答案。"
-    return "模型暂时不可用，当前缺少可执行的沉淀 Rules 或 Skills，需要补充更多信息。"
-
-
-def _is_generic_missing_capability_answer(answer: str) -> bool:
-    return any(
-        marker in answer
-        for marker in [
-            "当前缺少可执行的沉淀 Rules 或 Skills",
-            "需要补充更多业务信息",
-            "请补充这个问题所属的业务场景",
-        ]
-    )
-
-
-def _general_knowledge_fallback(question: str) -> str:
-    if "水" in question and "结冰" in question:
-        return (
-            "水结冰是因为温度降低后，水分子的热运动减弱，分子之间更容易形成稳定的氢键结构。"
-            "在标准大气压下，纯水通常在 0°C 左右凝固成冰。"
-        )
-    if "Python" in question and "Java" in question and "区别" in question:
-        return (
-            "Python 更强调简洁和开发效率，常用于脚本、数据分析、AI 和自动化；"
-            "Java 更强调工程化、类型约束和大型服务端生态，常用于企业后端、Android 和大型系统。"
-            "简单说，Python 上手快、表达短，Java 结构更严谨、长期维护能力强。"
-        )
-    return (
-        "这是一个基础常识问题，不需要补充业务字段或外部系统配置。"
-        "当前模型不可用时，我只能给出保守回答：请围绕定义、原因、例子和适用边界来理解这个问题；"
-        "如果你希望更准确，我可以在模型或搜索能力可用后继续补充。"
-    )
 
 
 def _context_with_evaluation(

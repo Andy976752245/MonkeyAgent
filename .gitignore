@@ -7,3 +7,4 @@ __pycache__/
 !.env.example
 !.env.bailian.example
 .DS_Store
+docs/COMMON_COMMANDS_LOCAL.md

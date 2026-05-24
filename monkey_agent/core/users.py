@@ -18,6 +18,7 @@ class PersonalWorkspace:
     pending_review_dir: Path
     goals_dir: Path
     runs_dir: Path
+    artifacts_dir: Path
 
     @classmethod
     def from_runtime(cls, runtime_dir: Path) -> "PersonalWorkspace":
@@ -35,6 +36,7 @@ class PersonalWorkspace:
             pending_review_dir=root / "pending_review",
             goals_dir=root / "goals",
             runs_dir=root / "runs",
+            artifacts_dir=root / "artifacts",
         )
 
     def ensure(self) -> None:
@@ -46,6 +48,7 @@ class PersonalWorkspace:
             self.counterexamples_dir,
             self.generated_tools_dir,
             self.goals_dir,
+            self.artifacts_dir / "skills",
             self.runs_dir / "ask",
             self.runs_dir / "goals",
             self.runs_dir / "tools",

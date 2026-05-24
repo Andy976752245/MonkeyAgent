@@ -3,29 +3,12 @@ from __future__ import annotations
 from typing import Any
 from pathlib import Path
 
+from monkey_agent.app.container import ServiceContainer, build_service_container
 from monkey_agent.domains.tools.capability import CapabilityRegistry
-from monkey_agent.domains.agent_skills import AgentSkillInstaller, AgentSkillRepository
-from monkey_agent.domains.classifier import QuestionClassifier
 from monkey_agent.core.config import Settings, load_settings
-from monkey_agent.domains.tools.generated import GeneratedToolStore
-from monkey_agent.workflows.goal.evaluator import GoalEvaluator
-from monkey_agent.workflows.goal.executor import GoalExecutor
-from monkey_agent.workflows.goal.planner import CompositeGoalPlanner
-from monkey_agent.domains.goals.store import GoalStore
-from monkey_agent.workflows.goal.workflow import build_goal_workflow
-from monkey_agent.workflows.ask.nodes import GraphNodes
-from monkey_agent.workflows.ask.workflow import build_workflow
-from monkey_agent.domains.learning.usage_memory import UsageMemory
-from monkey_agent.domains.learning.review_store import ReviewStore
-from monkey_agent.domains.memory import PersonalMemoryStore
 from monkey_agent.domains.models.bailian import ChatModel, build_chat_model
-from monkey_agent.domains.rules.repository import RuleRepository
-from monkey_agent.domains.runs import RunStore
-from monkey_agent.domains.skills.repository import SkillRepository
 from monkey_agent.core.state import AgentState
-from monkey_agent.domains.tool_builder import ToolBuilderService
 from monkey_agent.domains.tools import ToolRegistry, build_default_tool_registry
-from monkey_agent.core.users import PersonalWorkspace
 
 
 class MonkeyAgent:
@@ -38,10 +21,6 @@ class MonkeyAgent:
     ) -> None:
         self.settings = settings or load_settings()
         self.chat_model = chat_model or build_chat_model(self.settings)
-        self.global_generated_tool_store = GeneratedToolStore(
-            self.settings.generated_tools_dir,
-            self.settings.generated_tools_registry,
-        )
         if tool_registry is not None:
             self._base_tools = list(tool_registry.tools)
         elif capability_registry is not None:
@@ -51,79 +30,14 @@ class MonkeyAgent:
         self._configure_workspace()
 
     def _configure_workspace(self) -> None:
-        self.personal_workspace = PersonalWorkspace.from_runtime(self.settings.runtime_dir)
-        self.personal_workspace.ensure()
-        self.rules = RuleRepository(
-            self.personal_workspace.rules_dir,
-            fallback_dirs=[self.settings.rules_dir],
-        )
-        self.skills = SkillRepository(
-            self.personal_workspace.skills_dir,
-            fallback_dirs=[self.settings.skills_dir],
-        )
-        self.agent_skills = AgentSkillRepository(
-            self.personal_workspace.agent_skills_dir,
-            self.personal_workspace.agent_skills_registry,
-        )
-        self.agent_skill_installer = AgentSkillInstaller(
-            self.personal_workspace.agent_skills_dir,
-            self.agent_skills,
-        )
-        self.review_store = ReviewStore(
-            self.personal_workspace.pending_review_dir,
-            self.personal_workspace.rules_dir,
-            self.personal_workspace.skills_dir,
-            self.personal_workspace.memory_dir,
-            self.personal_workspace.counterexamples_dir,
-        )
-        self.usage_memory = UsageMemory(
-            self.personal_workspace.memory_dir,
-            repeat_threshold=self.settings.learning_repeat_threshold,
-        )
-        self.personal_memory = PersonalMemoryStore(
-            self.personal_workspace.memory_dir,
-            self.personal_workspace.counterexamples_dir,
-            fallback_memory_dirs=[self.settings.memory_dir],
-            fallback_counterexamples_dirs=[self.settings.counterexamples_dir],
-        )
-        self.generated_tool_store = GeneratedToolStore(
-            self.personal_workspace.generated_tools_dir,
-            self.personal_workspace.generated_tools_registry,
-        )
-        self.tool_registry = ToolRegistry(list(self._base_tools))
-        for tool in self.global_generated_tool_store.enabled_tools():
-            self.tool_registry.add(tool)
-        for tool in self.generated_tool_store.enabled_tools():
-            self.tool_registry.add(tool)
-        self.capability_registry = CapabilityRegistry(self.tool_registry.tools)
-        self.classifier = QuestionClassifier(self.chat_model)
-        self.tool_builder = ToolBuilderService(
+        self.container: ServiceContainer = build_service_container(
+            self.settings,
             self.chat_model,
-            self.generated_tool_store,
-            self.personal_workspace.root,
+            self._base_tools,
+            self._ask_for_goal,
         )
-        self.goal_store = GoalStore(self.personal_workspace.goals_dir)
-        self.run_store = RunStore(self.personal_workspace.runs_dir)
-        self.nodes = GraphNodes(
-            self.rules,
-            self.skills,
-            self.agent_skills,
-            self.chat_model,
-            self.review_store,
-            self.capability_registry,
-            self.usage_memory,
-            self.classifier,
-            self.personal_memory,
-            self.tool_builder,
-            self.tool_registry,
-        )
-        self.workflow = build_workflow(self.nodes)
-        self.goal_workflow = build_goal_workflow(
-            self.goal_store,
-            CompositeGoalPlanner(self.chat_model),
-            GoalExecutor(self._ask_for_goal, self.review_store),
-            GoalEvaluator(),
-        )
+        for name, value in self.container.__dict__.items():
+            setattr(self, name, value)
 
     def _ask_for_goal(self, question: str, context: dict[str, Any]) -> AgentState:
         return self.ask(question, context=context)
@@ -199,6 +113,26 @@ class MonkeyAgent:
 
     def remove_agent_skill(self, skill_name: str) -> dict[str, Any]:
         return self.agent_skill_installer.remove(skill_name)
+
+    def run_agent_skill(
+        self,
+        skill_name: str,
+        script_path: str,
+        input_data: dict[str, Any] | None = None,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        skill = self.agent_skills.get(skill_name)
+        if skill is None:
+            raise FileNotFoundError(f"agent skill not found: {skill_name}")
+        from monkey_agent.domains.agent_skills.runtime_models import AgentSkillExecutionPlan
+
+        plan = AgentSkillExecutionPlan(
+            skill_id=skill.id,
+            script_path=script_path,
+            input_data=input_data or {},
+            reason="cli_run",
+        )
+        return self.agent_skill_runtime.execute(skill, plan, confirm=confirm).to_dict()
 
     def list_memory(self) -> list[dict[str, Any]]:
         return _list_yaml_dicts_many(

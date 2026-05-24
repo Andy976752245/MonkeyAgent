@@ -97,7 +97,25 @@ def _looks_like_arithmetic_question(question: str) -> bool:
         .replace("×", "*")
         .replace("÷", "/")
     )
+    normalized = _normalize_chinese_arithmetic(normalized)
     return bool(
         re.search(r"\d", normalized)
         and re.search(r"\d\s*[\+\-\*/]\s*\d|\([0-9\+\-\*/\.\s]+\)|帮我算|计算", normalized)
     )
+
+
+def _normalize_chinese_arithmetic(text: str) -> str:
+    replacements = [
+        ("加上", "+"),
+        ("加", "+"),
+        ("减去", "-"),
+        ("减", "-"),
+        ("乘以", "*"),
+        ("乘", "*"),
+        ("除以", "/"),
+        ("除", "/"),
+    ]
+    normalized = text
+    for old, new in replacements:
+        normalized = normalized.replace(old, new)
+    return normalized

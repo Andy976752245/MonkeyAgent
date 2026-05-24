@@ -234,6 +234,7 @@ def _extract_arithmetic_expression(question: str) -> str | None:
         .replace("÷", "/")
         .replace("％", "%")
     )
+    normalized = _normalize_chinese_arithmetic(normalized)
     normalized = re.sub(r"(等于|是多少|等于几|帮我算一下|帮我算|计算|请算一下|请算)", " ", normalized)
     candidates = re.findall(r"[0-9\.\+\-\*/%\(\)\s]+", normalized)
     candidates = [item.strip() for item in candidates if re.search(r"\d", item)]
@@ -243,6 +244,23 @@ def _extract_arithmetic_expression(question: str) -> str | None:
     if "%" in expression:
         expression = re.sub(r"(\d+(?:\.\d+)?)\s*%", r"(\1/100)", expression)
     return expression
+
+
+def _normalize_chinese_arithmetic(text: str) -> str:
+    replacements = [
+        ("加上", "+"),
+        ("加", "+"),
+        ("减去", "-"),
+        ("减", "-"),
+        ("乘以", "*"),
+        ("乘", "*"),
+        ("除以", "/"),
+        ("除", "/"),
+    ]
+    normalized = text
+    for old, new in replacements:
+        normalized = normalized.replace(old, new)
+    return normalized
 
 
 def _safe_arithmetic_eval(expression: str) -> Decimal:
