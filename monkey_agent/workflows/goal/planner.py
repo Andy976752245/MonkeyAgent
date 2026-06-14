@@ -8,8 +8,38 @@ from monkey_agent.domains.goals.models import Goal, GoalTask
 from monkey_agent.domains.models.bailian import ChatModel
 
 
-INTEGRATION_HINTS = ("接入", "对接", "API", "接口", "机器人", "webhook", "Webhook", "飞书", "发送")
-WRITE_HINTS = ("发送", "写入", "创建", "删除", "更新", "同步", "通知", "推送", "发一条")
+INTEGRATION_HINTS = (
+    "接入",
+    "对接",
+    "API",
+    "接口",
+    "机器人",
+    "webhook",
+    "Webhook",
+    "飞书",
+    "发送",
+    "发消息",
+    "发信息",
+    "发个信息",
+    "平台",
+    "系统",
+    "应用",
+    "SaaS",
+)
+WRITE_HINTS = (
+    "发送",
+    "发消息",
+    "发信息",
+    "发个信息",
+    "写入",
+    "创建",
+    "删除",
+    "更新",
+    "同步",
+    "通知",
+    "推送",
+    "发一条",
+)
 SEARCH_HINTS = ("搜索", "查询", "查一下", "公开", "文档", "资料", "最新", "赛程", "天气")
 PERSONAL_HINTS = ("准备", "拜访", "会议", "计划", "沟通", "建议", "应该", "怎么办")
 LEARNING_HINTS = ("沉淀", "以后", "记住", "复用", "规则", "Skill", "skill")
@@ -127,7 +157,7 @@ class HeuristicGoalPlanner:
         max_steps: int = 5,
     ) -> tuple[list[str], list[GoalTask]]:
         context = context or {}
-        if _has(goal, INTEGRATION_HINTS):
+        if _is_integration_goal(goal):
             return _integration_plan(goal)
         if _has(goal, SEARCH_HINTS):
             return _research_plan(goal)
@@ -211,7 +241,7 @@ class CompositeGoalPlanner:
         return self.heuristic.revise(goal, tasks, evaluation)
 
 def _integration_plan(goal: str) -> tuple[list[str], list[GoalTask]]:
-    is_write = _has(goal, WRITE_HINTS)
+    is_write = _is_write_goal(goal)
     tasks = [
         GoalTask(
             task_id="task_001",
@@ -429,7 +459,7 @@ def _apply_dependencies_from_plan(tasks: list[GoalTask], dependencies: Any) -> N
 
 def _enforce_write_confirmation(goal: str | Goal, tasks: list[GoalTask]) -> None:
     text = goal.goal if isinstance(goal, Goal) else goal
-    is_write = _has(text, WRITE_HINTS)
+    is_write = _is_write_goal(text)
     for task in tasks:
         if task.risk in {"medium", "high"} and is_write:
             if task.executor in {"human_confirm", "validation", "learning", "research"}:
@@ -477,3 +507,27 @@ def _next_task_id(tasks: list[GoalTask]) -> str:
 
 def _has(text: str, hints: tuple[str, ...]) -> bool:
     return any(hint in text for hint in hints)
+
+
+def _is_integration_goal(text: str) -> bool:
+    if _has(text, INTEGRATION_HINTS):
+        return True
+    return bool(
+        re.search(
+            r"(给|向|往).{0,30}(平台|系统|应用|机器人|群|频道|账号|用户|客户|人).{0,30}(发|发送|推送|通知)",
+            text,
+            flags=re.I,
+        )
+    )
+
+
+def _is_write_goal(text: str) -> bool:
+    if _has(text, WRITE_HINTS):
+        return True
+    return bool(
+        re.search(
+            r"(给|向|往).{0,30}(平台|系统|应用|机器人|群|频道|账号|用户|客户|人).{0,30}(发|发送|推送|通知|写)",
+            text,
+            flags=re.I,
+        )
+    )

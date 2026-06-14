@@ -77,7 +77,12 @@ def check_tool_error_not_hidden(state: dict[str, Any]) -> EvaluationCheck:
         if result.get("error") or result.get("requires_more_info"):
             failures.append(str(result.get("error") or result.get("rule_id") or "tool_error"))
     exploration = state.get("exploration")
-    if isinstance(exploration, dict) and exploration.get("tool_found") and not exploration.get("success", True):
+    if (
+        isinstance(exploration, dict)
+        and exploration.get("tool_found")
+        and not exploration.get("success", True)
+        and not exploration.get("fallback_to_general_reason")
+    ):
         failures.append(str(exploration.get("error") or exploration.get("tool_id") or "tool_error"))
     if not failures:
         return EvaluationCheck("tool_error_not_hidden", True, "无工具失败需要披露。")

@@ -41,6 +41,9 @@ class SequentialWorkflow:
                 if current.get("exploration", {}).get("success"):
                     current.update(_invoke_node("reason", self.nodes.reason, current))
                     current.update(_invoke_node("evaluate", self.nodes.evaluate, current))
+                elif capability_solved(current) == "general_reason":
+                    current.update(_invoke_node("general_reason", self.nodes.general_reason, current))
+                    current.update(_invoke_node("evaluate", self.nodes.evaluate, current))
                 elif current.get("exploration", {}).get("tool_found"):
                     current.update(_invoke_node("need_more_info", self.nodes.need_more_info, current))
                     current.update(_invoke_node("evaluate", self.nodes.evaluate, current))
@@ -127,6 +130,7 @@ def build_workflow(nodes: GraphNodes) -> Any:
         capability_solved,
         {
             "solved": "reason",
+            "general_reason": "general_reason",
             "tool_failed": "need_more_info",
             "unsolved": "discover_tool_spec",
         },

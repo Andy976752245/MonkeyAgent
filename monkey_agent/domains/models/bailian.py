@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from monkey_agent.advice import is_personal_advice_task, personal_advice_answer
+from monkey_agent.advice import (
+    is_personal_advice_task,
+    personal_advice_answer,
+    should_use_personal_advice_template,
+)
 from monkey_agent.core.config import Settings
 
 
@@ -262,7 +266,7 @@ class LocalHeuristicModel:
         if skills:
             task_type = str(context.get("task_type") or "") if isinstance(context, dict) else ""
             intents = context.get("intent_keywords", []) if isinstance(context, dict) else []
-            if is_personal_advice_task(task_type, intents) or any(
+            if should_use_personal_advice_template(question, task_type, intents) or any(
                 "个人助理" in str(item.get("name", "")) for item in skills
             ):
                 return personal_advice_answer(question, task_type, context)

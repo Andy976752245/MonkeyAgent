@@ -7,6 +7,7 @@ from monkey_agent.advice import (
     is_personal_advice_task,
     personal_advice_answer,
     personal_advice_clarification_questions,
+    should_use_personal_advice_template,
 )
 from monkey_agent.workflows.ask.answers import (
     agent_skill_execution_content,
@@ -172,7 +173,7 @@ class GraphNodes:
         }
 
     def match_rules(self, state: AgentState) -> dict[str, Any]:
-        if state.get("adopted_candidate_id"):
+        if state.get("adopted_candidate_id") or state.get("rejected_candidate_id"):
             return {
                 "route": "adopted",
                 "execution_path": state.get("execution_path", []) + ["match_rules"],
@@ -252,7 +253,7 @@ class GraphNodes:
         }
 
     def match_skills(self, state: AgentState) -> dict[str, Any]:
-        if state.get("adopted_candidate_id"):
+        if state.get("adopted_candidate_id") or state.get("rejected_candidate_id"):
             return {
                 "route": "adopted",
                 "execution_path": state.get("execution_path", []) + ["match_skills"],
@@ -406,6 +407,23 @@ class GraphNodes:
         }
 
     def explore_capabilities(self, state: AgentState) -> dict[str, Any]:
+        routing_policy = state.get("routing_policy") or {}
+        if (
+            routing_policy.get("prefer_general_reason")
+            and not state.get("required_tools")
+            and not _explicit_tool_build_requested(state["question"])
+            and not _explicit_public_lookup_requested(state["question"])
+            and not state.get("context", {}).get("force_tool_builder")
+        ):
+            return {
+                "routing_policy": {
+                    **routing_policy,
+                    "tool_exploration_skipped": True,
+                    "tool_exploration_skip_reason": "prefer_general_reason_without_required_tools",
+                },
+                "execution_path": state.get("execution_path", [])
+                + ["explore_capabilities_skipped"],
+            }
         result = self.tool_registry.explore(
             state["question"],
             state.get("context", {}),
@@ -927,7 +945,8 @@ class GraphNodes:
         context["task_type"] = state.get("task_type", "general")
         context["intent_keywords"] = state.get("intent_keywords", [])
         errors = list(state.get("errors", []))
-        if is_personal_advice_task(
+        if should_use_personal_advice_template(
+            state["question"],
             state.get("task_type", "general"),
             state.get("intent_keywords", []),
         ):
@@ -958,6 +977,7 @@ class GraphNodes:
             "answer": answer,
             "confidence": 0.65,
             "clarification_questions": clarification_questions,
+            "exploration": _general_reason_exploration(state),
             "routing_policy": {
                 **state.get("routing_policy", {}),
                 "final_route": "general_reason",
@@ -1027,6 +1047,28 @@ class GraphNodes:
         if context.get("disable_adoption"):
             return None
         candidate_id = context.get("candidate_id")
+        if not candidate_id and _is_negative_adoption(question):
+            latest = self.review_store.latest_pending()
+            if not latest:
+                return {
+                    "answer": "当前没有待处理的沉淀候选。",
+                    "confidence": 0.4,
+                    "adopted_candidate_id": None,
+                }
+            rejected_id = str(latest["id"])
+            try:
+                path = self.review_store.reject(rejected_id)
+            except FileNotFoundError:
+                return {
+                    "answer": f"没有找到待沉淀候选：{rejected_id}",
+                    "confidence": 0.2,
+                    "adopted_candidate_id": None,
+                }
+            return {
+                "answer": f"已拒绝候选 {rejected_id}，文件已移至：{path}",
+                "confidence": 0.9,
+                "rejected_candidate_id": rejected_id,
+            }
         if not candidate_id and not _is_affirmative_adoption(question):
             return None
         if not candidate_id:
@@ -1056,13 +1098,13 @@ class GraphNodes:
 
 
 def has_rules(state: AgentState) -> str:
-    if state.get("adopted_candidate_id"):
+    if state.get("adopted_candidate_id") or state.get("rejected_candidate_id"):
         return "adopted"
     return "rules" if state.get("matched_rules") else "skills"
 
 
 def has_skills(state: AgentState) -> str:
-    if state.get("adopted_candidate_id"):
+    if state.get("adopted_candidate_id") or state.get("rejected_candidate_id"):
         return "adopted"
     return "skills" if state.get("matched_skills") else "need_more_info"
 
@@ -1072,6 +1114,12 @@ def capability_solved(state: AgentState) -> str:
     if exploration.get("success"):
         return "solved"
     if exploration.get("tool_found"):
+        routing_policy = state.get("routing_policy") or {}
+        if (
+            routing_policy.get("prefer_general_reason")
+            and str(exploration.get("tool_id") or "") == "public_web_search"
+        ):
+            return "general_reason"
         return "tool_failed"
     return "unsolved"
 
@@ -1182,6 +1230,27 @@ def _explicit_tool_build_requested(question: str) -> bool:
     )
 
 
+def _explicit_public_lookup_requested(question: str) -> bool:
+    return any(
+        hint in question
+        for hint in [
+            "搜索",
+            "查一下",
+            "查询",
+            "查找",
+            "公开资料",
+            "公开文档",
+            "最新",
+            "今天",
+            "明天",
+            "天气",
+            "NBA",
+            "比赛",
+            "新闻",
+        ]
+    )
+
+
 def _explicit_learning_requested(question: str) -> bool:
     return any(
         hint in question
@@ -1203,6 +1272,17 @@ def _likely_memory_candidate(question: str) -> bool:
 
 def _should_general_reason(state: AgentState) -> bool:
     return RoutingPolicy().prefer_general_reason(state)
+
+
+def _general_reason_exploration(state: AgentState) -> dict[str, Any]:
+    exploration = dict(state.get("exploration") or {})
+    if (
+        exploration.get("tool_found")
+        and not exploration.get("success", True)
+        and str(exploration.get("tool_id") or "") == "public_web_search"
+    ):
+        exploration["fallback_to_general_reason"] = True
+    return exploration
 
 
 def _can_skip_llm_classify(state: AgentState) -> bool:
@@ -1270,10 +1350,34 @@ def _is_affirmative_adoption(text: str) -> bool:
             "同意采用",
             "采用这个",
             "采用该",
+            "采用刚才那个",
+            "记住这个",
+            "记住刚才",
+            "以后都这样",
             "批准沉淀",
             "确认沉淀",
             "approve",
             "adopt",
+        ]
+    )
+
+
+def _is_negative_adoption(text: str) -> bool:
+    normalized = text.strip().lower()
+    if normalized in {"不同意", "拒绝", "否", "不要", "no", "n"}:
+        return True
+    return any(
+        phrase in normalized
+        for phrase in [
+            "不要沉淀",
+            "不用沉淀",
+            "不沉淀",
+            "不要采用",
+            "不采用",
+            "这个规则不对",
+            "规则不对",
+            "候选不对",
+            "reject",
         ]
     )
 

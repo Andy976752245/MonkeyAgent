@@ -206,3 +206,18 @@ class GoalTest(unittest.TestCase):
             )
             self.assertEqual(confirmed["status"], "completed")
 
+    def test_goal_colloquial_send_message_uses_integration_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            settings = settings_for(Path(raw))
+            agent = MonkeyAgent(
+                settings=settings,
+                chat_model=LocalHeuristicModel(),
+                capability_registry=CapabilityRegistry([]),
+            )
+            started = agent.start_goal("帮我给x 平台发个信息", max_steps=5)
+            executors = {task["executor"] for task in started["tasks"]}
+            task_types = {task["type"] for task in started["tasks"]}
+            self.assertIn("tool_builder", executors)
+            self.assertIn("human_confirm", executors)
+            self.assertIn("tool_build", task_types)
+            self.assertEqual(started["status"], "active")

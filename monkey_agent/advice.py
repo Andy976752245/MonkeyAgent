@@ -21,6 +21,27 @@ def is_personal_advice_task(task_type: str | None, intents: list[str] | None = N
     )
 
 
+def should_use_personal_advice_template(
+    question: str,
+    task_type: str | None,
+    intents: list[str] | None = None,
+) -> bool:
+    """Return true only when the local advice template fits the user intent.
+
+    Classifiers can over-label business knowledge questions as planning advice.
+    For example, "FTC 料箱补货的重点是什么" needs domain reasoning, not a
+    generic meeting/biz-prep checklist. This guard keeps templates for clearly
+    personal action questions and lets the model answer domain knowledge.
+    """
+    if not is_personal_advice_task(task_type, intents):
+        return False
+    if _looks_like_opinion_question(question) and not _has_personal_action_context(question):
+        return False
+    if _looks_like_domain_knowledge_question(question) and not _has_personal_action_context(question):
+        return False
+    return True
+
+
 def personal_advice_clarification_questions(task_type: str | None) -> list[str]:
     if task_type == "sales_support":
         return [
@@ -118,4 +139,69 @@ def personal_advice_answer(
         f"{body}\n\n"
         "如果时间很紧，优先准备：拜访目标/会议目标、对方背景、3 个关键问题、1 个可落地下一步。\n\n"
         f"为了把建议进一步贴合你的场景，我还需要确认：\n{follow_up}"
+    )
+
+
+def _looks_like_domain_knowledge_question(question: str) -> bool:
+    knowledge_markers = [
+        "重点是什么",
+        "重点是啥",
+        "关键是什么",
+        "核心是什么",
+        "是什么",
+        "怎么理解",
+        "如何理解",
+        "怎么看",
+        "有什么区别",
+    ]
+    domain_markers = [
+        "FTC",
+        "料箱",
+        "补货",
+        "仓储",
+        "库存",
+        "库位",
+        "WMS",
+        "WCS",
+        "产线",
+        "波次",
+        "拣选",
+        "容器",
+    ]
+    return any(marker in question for marker in knowledge_markers) and any(
+        marker in question for marker in domain_markers
+    )
+
+
+def _looks_like_opinion_question(question: str) -> bool:
+    return any(
+        marker in question
+        for marker in [
+            "你怎么看",
+            "怎么看待",
+            "如何看待",
+            "你觉得",
+            "你认为",
+            "评价一下",
+            "谈谈",
+        ]
+    )
+
+
+def _has_personal_action_context(question: str) -> bool:
+    return any(
+        marker in question
+        for marker in [
+            "我明天",
+            "我要",
+            "帮我准备",
+            "我应该",
+            "拜访",
+            "会议",
+            "沟通",
+            "话术",
+            "行动计划",
+            "计划表",
+            "怎么准备",
+        ]
     )

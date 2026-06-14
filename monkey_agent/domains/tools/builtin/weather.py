@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 import json
+import os
 import re
 import ssl
 import urllib.parse
@@ -72,7 +73,12 @@ class OpenMeteoWeatherTool:
         return "天气" in question or context.get("capability") == "weather"
 
     def execute(self, question: str, context: dict[str, Any]) -> ToolResult:
-        location = context.get("location") or _extract_location(question)
+        location = (
+            context.get("location")
+            or _extract_location(question)
+            or context.get("default_location")
+            or os.getenv("MONKEY_AGENT_DEFAULT_LOCATION")
+        )
         requested_day = str(context.get("date") or _extract_date(question))
         if not location:
             return ToolResult(
@@ -223,11 +229,11 @@ def _ssl_context() -> ssl.SSLContext:
 
 
 def _extract_location(question: str) -> str | None:
+    cleaned = _strip_weather_query_noise(question)
     for pattern in [
         r"(?:今天|今日|当日|明天|明日|后天)?(.+?)(?:天气|气温|降水)",
-        r"(?:查一下|查询)(?:今天|今日|当日|明天|明日|后天)?(.+?)(?:天气|气温|降水)",
     ]:
-        match = re.search(pattern, question)
+        match = re.search(pattern, cleaned)
         if match:
             location = match.group(1).strip(" ，,。？?的")
             location = _normalize_location(location)
@@ -237,9 +243,20 @@ def _extract_location(question: str) -> str | None:
 
 
 def _normalize_location(location: str) -> str:
-    value = location.strip()
-    value = re.sub(r"^(?:请问|帮我查一下|帮我查|查一下|查询|看看)", "", value)
+    value = _strip_weather_query_noise(location)
     value = re.sub(r"(?:省|市|区|县)$", lambda m: m.group(0), value)
+    return value.strip(" ，,。？?的")
+
+
+def _strip_weather_query_noise(text: str) -> str:
+    value = text.strip()
+    value = re.sub(
+        r"^(?:请问|麻烦|帮我|帮忙|帮我查一下|帮我查|查一下|查询|看一下|看下|看看|看|了解一下|获取)",
+        "",
+        value,
+    )
+    value = re.sub(r"^(?:今天|今日|当日|明天|明日|后天)", "", value)
+    value = re.sub(r"(?:今天|今日|当日|明天|明日|后天)$", "", value)
     return value.strip(" ，,。？?的")
 
 

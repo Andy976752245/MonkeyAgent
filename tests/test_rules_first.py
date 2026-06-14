@@ -20,8 +20,10 @@ from monkey_agent.domains.integrations.telegram import (
     TelegramPollingRunner,
 )
 from monkey_agent.domains.integrations.telegram.handler import split_telegram_text
-from monkey_agent.domains.tools.builtin.weather import _location_candidates
+from monkey_agent.domains.tools.builtin.weather import _extract_location, _location_candidates
 from monkey_agent.core.config import Settings
+from monkey_agent.core.env_file import update_env_file
+from monkey_agent.domains.runs.diagnostics import diagnose_run, format_diagnosis
 from monkey_agent.domains.goals.models import GoalTask
 from monkey_agent.domains.models.bailian import BailianChatModel, LocalHeuristicModel
 from monkey_agent.domains.evaluation import AskEvaluator
@@ -104,6 +106,7 @@ def settings_for(tmp: Path) -> Settings:
         telegram_poll_timeout=25,
         telegram_poll_interval=0,
         telegram_request_timeout=30,
+        default_location="",
         agent_skill_script_timeout=30,
     )
 
@@ -589,6 +592,12 @@ class MonkeyAgentRulesFirstTest(unittest.TestCase):
         self.assertIn("安徽省合肥市", candidates)
         self.assertIn("Hefei", candidates)
 
+    def test_weather_location_extraction_ignores_query_prefixes(self) -> None:
+        self.assertEqual(_extract_location("看下明天上海的天气"), "上海")
+        self.assertEqual(_extract_location("帮我查一下后天合肥天气"), "合肥")
+        self.assertEqual(_extract_location("查询今天北京气温"), "北京")
+        self.assertIsNone(_extract_location("看下明天的天气"))
+
     def test_weather_rule_does_not_match_non_weather_tomorrow_question(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             settings = settings_for(Path(raw))
@@ -893,6 +902,38 @@ class MonkeyAgentRulesFirstTest(unittest.TestCase):
             self.assertEqual(pending[0]["source_tool"], "fake_web_search")
             self.assertTrue(pending[0]["public_evidence"])
             self.assertIn("llm_draft", pending[0])
+
+    def test_project_explanation_falls_back_to_general_reason_when_search_fails(self) -> None:
+        class NoResultsSearchTool(FakeWebSearchTool):
+            id = "public_web_search"
+            name = "公开网络搜索"
+
+            def execute(self, question, context):
+                return ToolResult(
+                    tool_id=self.id,
+                    tool_name=self.name,
+                    success=False,
+                    stable_rule_candidate=False,
+                    candidate_type="skill",
+                    content="未搜索到可用公开结果。",
+                    error="no_results",
+                )
+
+        class ExplanationModel(LocalHeuristicModel):
+            def generate(self, question, deterministic_results, skills, context):
+                return "MonkeyAgent 使用 LangGraph 做流程编排，并用 Harness-style 工程闭环管理目标、评估、确认和 Trace。"
+
+        with tempfile.TemporaryDirectory() as raw:
+            settings = settings_for(Path(raw))
+            agent = MonkeyAgent(
+                settings=settings,
+                chat_model=ExplanationModel(),
+                capability_registry=CapabilityRegistry([NoResultsSearchTool()]),
+            )
+            result = agent.ask("你用到LangGraph、Harness Engineering哪些内容？怎么应用的")
+            self.assertEqual(result["route"], "general_reason")
+            self.assertIn("LangGraph", result["answer"])
+            self.assertNotIn("need_more_info", result["execution_path"])
 
     def test_public_search_evidence_can_feed_tool_builder(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1411,9 +1452,70 @@ class MonkeyAgentRulesFirstTest(unittest.TestCase):
             )
             agent = MonkeyAgent(settings=settings, chat_model=LocalHeuristicModel())
             results = _run_quickstart(agent)
-            self.assertEqual(len(results), 5)
+            self.assertEqual(len(results), 10)
             self.assertFalse(any(item["status"] == "FAIL" for item in results))
             self.assertTrue(all("run_id" in item for item in results if item["status"] != "FAIL"))
+
+    def test_update_env_file_preserves_existing_values_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            env_path = Path(raw) / ".env"
+            env_path.write_text("DASHSCOPE_API_KEY=old\n# comment\n", encoding="utf-8")
+            changed = update_env_file(
+                env_path,
+                {
+                    "DASHSCOPE_API_KEY": "new",
+                    "MONKEY_AGENT_DEFAULT_LOCATION": "上海",
+                },
+                overwrite=False,
+            )
+            content = env_path.read_text(encoding="utf-8")
+            self.assertIn("DASHSCOPE_API_KEY=old", content)
+            self.assertNotIn("DASHSCOPE_API_KEY=new", content)
+            self.assertIn("MONKEY_AGENT_DEFAULT_LOCATION=上海", content)
+            self.assertEqual(changed, ["MONKEY_AGENT_DEFAULT_LOCATION"])
+
+    def test_diagnose_run_formats_user_friendly_summary(self) -> None:
+        run = {
+            "id": "run_1",
+            "type": "ask",
+            "status": "completed",
+            "input": {"question": "看下明天的天气"},
+            "route": "need_more_info",
+            "tools": [{"tool_id": "open_meteo_weather", "success": False}],
+            "timings": [{"node": "llm_classify", "ms": 3500}],
+            "evaluation": {"status": "needs_revision", "failed_checks": ["tool_error_not_hidden"]},
+            "answer_preview": "请补充地点",
+        }
+        diagnosis = diagnose_run(run)
+        text = format_diagnosis(diagnosis)
+        self.assertIn("Run: run_1", text)
+        self.assertIn("失败工具", text)
+        self.assertIn("最慢节点: llm_classify", text)
+
+    def test_golden_prompts_do_not_fall_into_generic_clarification(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            settings = settings_for(Path(raw))
+            write_basic_rules(settings.rules_dir)
+            agent = MonkeyAgent(
+                settings=settings,
+                chat_model=LocalHeuristicModel(),
+                capability_registry=CapabilityRegistry([FakeWeatherTool()]),
+            )
+            prompts = [
+                "介绍你自己，说明你的能力",
+                "你用到LangGraph、Harness Engineering哪些内容？怎么应用的",
+                "1+1等于几",
+                "5乘以5等于多少",
+                "明天是几号",
+                "看下明天上海的天气",
+                "我明天拜访客户应该准备什么",
+                "帮我写一个周报结构",
+            ]
+            for prompt in prompts:
+                result = agent.ask(prompt)
+                self.assertNotEqual(result.get("route"), "need_more_info", prompt)
+                self.assertTrue(str(result.get("answer") or "").strip(), prompt)
+            self.assertIn("25", agent.ask("5乘以5等于多少").get("answer", ""))
 
     def test_chat_exits_cleanly_after_one_turn(self) -> None:
         class DummyAgent:

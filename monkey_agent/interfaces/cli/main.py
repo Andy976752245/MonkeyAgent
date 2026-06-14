@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import platform
@@ -8,6 +9,8 @@ from typing import Any
 from pathlib import Path
 
 from monkey_agent.app import MonkeyAgent
+from monkey_agent.core.env_file import ensure_env_file, update_env_file
+from monkey_agent.domains.runs.diagnostics import diagnose_run, format_diagnosis
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -28,6 +31,27 @@ def main(argv: list[str] | None = None) -> None:
 
     doctor_parser = sub.add_parser("doctor")
     doctor_parser.add_argument("--smoke", action="store_true")
+
+    setup_parser = sub.add_parser("setup")
+    setup_sub = setup_parser.add_subparsers(dest="setup_command")
+    setup_parser.add_argument("--yes", action="store_true")
+    setup_telegram = setup_sub.add_parser("telegram")
+    setup_telegram.add_argument("--token")
+    setup_telegram.add_argument("--chat-ids")
+    setup_telegram.add_argument("--poll-timeout", default="25")
+    setup_telegram.add_argument("--poll-interval", default="1")
+    setup_telegram.add_argument("--yes", action="store_true")
+    setup_location = setup_sub.add_parser("location")
+    setup_location.add_argument("--location")
+    setup_location.add_argument("--yes", action="store_true")
+    setup_model = setup_sub.add_parser("model")
+    setup_model.add_argument("--api-key")
+    setup_model.add_argument("--chat-model", default="qwen-plus")
+    setup_model.add_argument("--classifier-model", default="qwen-plus")
+    setup_model.add_argument("--reasoning-model", default="qwen-plus")
+    setup_model.add_argument("--tool-builder-model", default="qwen-plus")
+    setup_model.add_argument("--evaluator-model", default="qwen-plus")
+    setup_model.add_argument("--yes", action="store_true")
 
     quickstart_parser = sub.add_parser("quickstart")
     quickstart_parser.add_argument("--debug", action="store_true")
@@ -149,6 +173,10 @@ def main(argv: list[str] | None = None) -> None:
     runs_latest = runs_sub.add_parser("latest")
     runs_latest.add_argument("--type", choices=["ask", "goal", "tool"])
 
+    diagnose_parser = sub.add_parser("diagnose")
+    diagnose_parser.add_argument("run_id", help="run id or latest")
+    diagnose_parser.add_argument("--type", choices=["ask", "goal", "tool"])
+
     model_parser = sub.add_parser("model")
     model_sub = model_parser.add_subparsers(dest="model_command", required=True)
     smoke = model_sub.add_parser("smoke")
@@ -164,6 +192,9 @@ def main(argv: list[str] | None = None) -> None:
 
         uvicorn.run("monkey_agent.interfaces.api.app:app", host=args.host, port=args.port)
         return
+    if args.command == "setup":
+        _run_setup(args)
+        return
 
     agent = MonkeyAgent()
     if args.command == "ask":
@@ -176,6 +207,9 @@ def main(argv: list[str] | None = None) -> None:
         _print_ask_result(result, debug=args.debug, trace=args.trace)
     elif args.command == "doctor":
         _print_doctor(_run_doctor(agent, smoke=args.smoke))
+    elif args.command == "diagnose":
+        run = agent.latest_run(run_type=args.type) if args.run_id == "latest" else agent.get_run(args.run_id)
+        print(format_diagnosis(diagnose_run(run)))
     elif args.command == "quickstart":
         _print_quickstart(_run_quickstart(agent), debug=args.debug)
     elif args.command == "chat":
@@ -396,11 +430,40 @@ def _run_doctor(agent: MonkeyAgent, smoke: bool = False) -> list[dict[str, str]]
     checks.append(_check_path("Global rules", agent.settings.rules_dir, writable=False))
     checks.append(_check_path("Global skills", agent.settings.skills_dir, writable=False))
     env_path = Path.cwd() / ".env"
-    checks.append(_check(".env", "PASS" if env_path.exists() else "WARN", str(env_path) if env_path.exists() else "not found"))
+    checks.append(
+        _check(
+            ".env",
+            "PASS" if env_path.exists() else "WARN",
+            str(env_path) if env_path.exists() else "not found",
+            "" if env_path.exists() else "运行 python3 -m monkey_agent setup 创建配置文件。",
+        )
+    )
     api_key = agent.settings.dashscope_api_key or os.getenv("DASHSCOPE_API_KEY", "")
-    checks.append(_check("DASHSCOPE_API_KEY", "PASS" if api_key else "WARN", "configured" if api_key else "not configured; local fallback may be used"))
+    checks.append(
+        _check(
+            "DASHSCOPE_API_KEY",
+            "PASS" if api_key else "WARN",
+            "configured" if api_key else "not configured; local fallback may be used",
+            "" if api_key else "运行 python3 -m monkey_agent setup model 配置百炼 API Key。",
+        )
+    )
     backend = getattr(agent.goal_workflow, "checkpoint_backend", "unknown")
-    checks.append(_check("Goal checkpoint", "PASS" if backend == "sqlite" else "WARN", str(backend)))
+    checks.append(
+        _check(
+            "Goal checkpoint",
+            "PASS" if backend == "sqlite" else "WARN",
+            str(backend),
+            "" if backend == "sqlite" else "安装 langgraph-checkpoint-sqlite 后可跨进程恢复 Goal。",
+        )
+    )
+    checks.append(
+        _check(
+            "Default location",
+            "PASS" if agent.settings.default_location else "WARN",
+            agent.settings.default_location or "not configured",
+            "" if agent.settings.default_location else "运行 python3 -m monkey_agent setup location 配置默认地点。",
+        )
+    )
     feishu_missing = [
         name
         for name, value in [
@@ -409,7 +472,14 @@ def _run_doctor(agent: MonkeyAgent, smoke: bool = False) -> list[dict[str, str]]
         ]
         if not value
     ]
-    checks.append(_check("Feishu", "WARN" if feishu_missing else "PASS", "optional missing: " + ", ".join(feishu_missing) if feishu_missing else "configured"))
+    checks.append(
+        _check(
+            "Feishu",
+            "WARN" if feishu_missing else "PASS",
+            "optional missing: " + ", ".join(feishu_missing) if feishu_missing else "configured",
+            "仅需要飞书入口时配置 FEISHU_APP_ID/FEISHU_APP_SECRET。",
+        )
+    )
     telegram_detail = (
         "configured"
         if agent.settings.telegram_bot_token and agent.settings.telegram_allowed_chat_ids
@@ -422,6 +492,9 @@ def _run_doctor(agent: MonkeyAgent, smoke: bool = False) -> list[dict[str, str]]
             if agent.settings.telegram_bot_token and agent.settings.telegram_allowed_chat_ids
             else "WARN",
             telegram_detail,
+            ""
+            if agent.settings.telegram_bot_token and agent.settings.telegram_allowed_chat_ids
+            else "运行 python3 -m monkey_agent setup telegram 配置 Telegram。",
         )
     )
     if smoke and api_key:
@@ -471,14 +544,19 @@ def _model_smoke_check(agent: MonkeyAgent, role: str) -> dict[str, str]:
     return _check(f"Model {role}", "PASS", "ok")
 
 
-def _check(name: str, status: str, detail: str) -> dict[str, str]:
-    return {"name": name, "status": status, "detail": detail}
+def _check(name: str, status: str, detail: str, suggestion: str = "") -> dict[str, str]:
+    item = {"name": name, "status": status, "detail": detail}
+    if suggestion:
+        item["suggestion"] = suggestion
+    return item
 
 
 def _print_doctor(checks: list[dict[str, str]]) -> None:
     print("MonkeyAgent Doctor")
     for item in checks:
         print(f"[{item['status']}] {item['name']}: {item['detail']}")
+        if item.get("suggestion"):
+            print(f"  next: {item['suggestion']}")
     failed = sum(1 for item in checks if item["status"] == "FAIL")
     warned = sum(1 for item in checks if item["status"] == "WARN")
     passed = sum(1 for item in checks if item["status"] == "PASS")
@@ -488,9 +566,14 @@ def _print_doctor(checks: list[dict[str, str]]) -> None:
 def _run_quickstart(agent: MonkeyAgent) -> list[dict[str, Any]]:
     scenarios = [
         ("基础计算", "1+1等于几", lambda r: r.get("route") == "rules"),
+        ("乘法计算", "5乘以5等于多少", lambda r: r.get("route") == "rules" and "25" in str(r.get("answer", ""))),
         ("日期推算", "明天是几号", lambda r: r.get("route") == "rules"),
+        ("自我介绍", "介绍你自己，说明你的能力", lambda r: r.get("route") != "need_more_info" and bool(r.get("answer"))),
+        ("架构说明", "你用到LangGraph、Harness Engineering哪些内容？怎么应用的", lambda r: r.get("route") != "need_more_info" and bool(r.get("answer"))),
         ("常识回答", "水为什么会结冰", lambda r: r.get("route") == "general_reason"),
+        ("天气默认地点", "看下明天的天气", lambda r: r.get("route") != "need_more_info" and bool(r.get("answer"))),
         ("个人助理建议", "我明天拜访客户应该准备什么", lambda r: r.get("route") in {"skills", "general_reason"}),
+        ("周报结构", "帮我写一个周报结构", lambda r: r.get("route") != "need_more_info" and bool(r.get("answer"))),
         ("记忆候选", "以后默认用表格输出，这是我的偏好", lambda r: bool(r.get("learning_candidate_id") or r.get("adoption_prompt") or r.get("exploration"))),
     ]
     results: list[dict[str, Any]] = []
@@ -566,6 +649,11 @@ def _run_telegram(agent: MonkeyAgent, trace: bool = False, once: bool = False) -
         lambda question, context: agent.ask(question, context=context),
         client,
         trace_default=trace,
+        status_provider=lambda: agent.latest_run(run_type="ask"),
+        goal_start=lambda goal, context: agent.start_goal(goal, context=context),
+        goal_step=lambda goal_id, confirm=False: agent.step_goal(goal_id, confirm=confirm),
+        goal_status=lambda goal_id: agent.get_goal(goal_id),
+        goal_list=lambda: agent.list_goals(),
     )
     runner = TelegramPollingRunner(agent.settings, client, handler)
     mode = "once" if once else "polling"
@@ -575,6 +663,60 @@ def _run_telegram(agent: MonkeyAgent, trace: bool = False, once: bool = False) -
     result = runner.run(once=once)
     if once or result.get("status") != "stopped":
         print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def _run_setup(args: argparse.Namespace) -> None:
+    env_path = Path.cwd() / ".env"
+    example = Path.cwd() / ".env.example"
+    created = ensure_env_file(env_path, example if example.exists() else None)
+    command = args.setup_command or "all"
+    overwrite = bool(getattr(args, "yes", False))
+    values: dict[str, str] = {}
+    if command in {"all", "model"}:
+        api_key = getattr(args, "api_key", None)
+        if api_key is None and command == "model":
+            api_key = getpass.getpass("DASHSCOPE_API_KEY: ").strip()
+        if api_key:
+            values["DASHSCOPE_API_KEY"] = api_key
+        values.update(
+            {
+                "CHAT_MODEL": getattr(args, "chat_model", "qwen-plus"),
+                "CLASSIFIER_MODEL": getattr(args, "classifier_model", "qwen-plus"),
+                "REASONING_MODEL": getattr(args, "reasoning_model", "qwen-plus"),
+                "TOOL_BUILDER_MODEL": getattr(args, "tool_builder_model", "qwen-plus"),
+                "EVALUATOR_MODEL": getattr(args, "evaluator_model", "qwen-plus"),
+            }
+        )
+    if command in {"all", "telegram"}:
+        token = getattr(args, "token", None)
+        chat_ids = getattr(args, "chat_ids", None)
+        if command == "telegram":
+            if token is None:
+                token = getpass.getpass("TELEGRAM_BOT_TOKEN: ").strip()
+            if chat_ids is None:
+                chat_ids = input("TELEGRAM_ALLOWED_CHAT_IDS: ").strip()
+        if token:
+            values["TELEGRAM_BOT_TOKEN"] = token
+        if chat_ids:
+            values["TELEGRAM_ALLOWED_CHAT_IDS"] = chat_ids
+        values["TELEGRAM_POLL_TIMEOUT"] = str(getattr(args, "poll_timeout", "25"))
+        values["TELEGRAM_POLL_INTERVAL"] = str(getattr(args, "poll_interval", "1"))
+    if command in {"all", "location"}:
+        location = getattr(args, "location", None)
+        if command == "location" and location is None:
+            location = input("MONKEY_AGENT_DEFAULT_LOCATION [上海]: ").strip() or "上海"
+        if location:
+            values["MONKEY_AGENT_DEFAULT_LOCATION"] = location
+    changed = update_env_file(env_path, values, overwrite=overwrite)
+    print(f".env: {env_path}")
+    if created:
+        print("已创建 .env。")
+    if changed:
+        print("已更新: " + ", ".join(changed))
+    skipped = [key for key in values if key not in changed]
+    if skipped:
+        print("已保留已有配置: " + ", ".join(skipped))
+    print("完成后请重新运行 python3 -m monkey_agent doctor 检查配置。")
 
 
 def _print_pending(item: dict[str, Any] | None) -> None:

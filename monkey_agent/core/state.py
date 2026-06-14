@@ -39,6 +39,7 @@ class AgentState(TypedDict, total=False):
     adoption_prompt: str | None
     adopted_candidate_id: str | None
     adopted_path: str | None
+    rejected_candidate_id: str | None
     memory_used: list[dict[str, Any]]
     counterexamples_checked: list[dict[str, Any]]
     errors: list[str]
